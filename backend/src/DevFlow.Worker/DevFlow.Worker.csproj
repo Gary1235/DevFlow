@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <ProjectReference Include="../DevFlow.Core/DevFlow.Core.csproj" />
+    <ProjectReference Include="../DevFlow.Infrastructure/DevFlow.Infrastructure.csproj" />
+    <ProjectReference Include="../DevFlow.Runners/DevFlow.Runners.csproj" />
+  </ItemGroup>
+</Project>

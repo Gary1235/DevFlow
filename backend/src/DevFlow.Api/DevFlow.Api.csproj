@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../DevFlow.Core/DevFlow.Core.csproj" />
+    <ProjectReference Include="../DevFlow.Contracts/DevFlow.Contracts.csproj" />
+    <ProjectReference Include="../DevFlow.Infrastructure/DevFlow.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DevFlow.Api/DevFlow.Api.csproj" />
+    <Project Path="src/DevFlow.Contracts/DevFlow.Contracts.csproj" />
+    <Project Path="src/DevFlow.Core/DevFlow.Core.csproj" />
+    <Project Path="src/DevFlow.Infrastructure/DevFlow.Infrastructure.csproj" />
+    <Project Path="src/DevFlow.Runners/DevFlow.Runners.csproj" />
+    <Project Path="src/DevFlow.Worker/DevFlow.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DevFlow.Tests/DevFlow.Tests.csproj" />
+  </Folder>
+</Solution>

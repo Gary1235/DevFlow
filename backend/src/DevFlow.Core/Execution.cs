@@ -12,6 +12,7 @@ public interface IWorkspaceManager
 {
     Task<Workspace> CreateAsync(ProjectDefinition project, Guid runId, CancellationToken ct);
     Task<string> SnapshotAsync(Workspace workspace, CancellationToken ct);
+    Task AssertUnchangedAsync(Workspace workspace, CancellationToken ct);
 }
 public interface IValidationRunner
 {
@@ -36,7 +37,9 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
         try
         {
             var project = await store.GetProjectAsync(claim.Task.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
-            workspace = await workspaces.CreateAsync(project, claim.Run.Id, ct);
+            var baseCommit = claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
+            var source = baseCommit is { } revision ? project with { BaseBranch = revision } : project;
+            workspace = await workspaces.CreateAsync(source, claim.Run.Id, ct);
             await store.SetWorkspaceAsync(claim.Run.Id, workspace, ct);
             await store.AppendEventAsync(claim.Task.Id, "PhaseStarted", TddPhase.Baseline.ToString(), ct);
             var baseline = await validation.ValidateAsync(project, workspace, claim.Run.Id, TddPhase.Baseline, ct);

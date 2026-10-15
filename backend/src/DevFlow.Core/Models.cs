@@ -1,10 +1,14 @@
 namespace DevFlow.Core;
 
-public enum TaskStatus { AwaitingPlan, AwaitingApproval, Queued, Running, AwaitingReview, Failed, Cancelled }
-public sealed record ProjectDefinition(Guid Id, string Name, string RepositoryPath, string BaseBranch, string[] ValidationArguments);
-public sealed record PlanDefinition(string Text);
+public enum TaskStatus { AwaitingPlan, AwaitingApproval, Queued, Running, AwaitingReview, Failed, Cancelled, Approved, Rejected, Merging, Merged, PlanningQueued, Planning, PlanningFailed }
+public enum RunKind { Implementation, Planning }
+public enum ReviewDecision { Approve, Reject }
+public sealed record ProjectDefinition(Guid Id, string Name, string RepositoryPath, string BaseBranch, string[] ValidationArguments,
+    AiConfiguration? AiDefaults = null, int Version = 0);
+public sealed record PlanDefinition(string Text, int Revision = 1, string? BaseCommit = null);
 public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Description, string AcceptanceCriteria,
-    TaskStatus Status, PlanDefinition? Plan, int Version, DateTimeOffset CreatedAt)
+    TaskStatus Status, PlanDefinition? Plan, int Version, DateTimeOffset CreatedAt,
+    string? RevisionInstructions = null, string? RevisionCommit = null, AiConfiguration? Ai = null)
 {
     public static WorkTask Create(Guid projectId, string title, string description, string criteria)
     {
@@ -14,9 +18,21 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
     }
     public WorkTask SetPlan(string text)
     {
-        if (Status is not (TaskStatus.AwaitingPlan or TaskStatus.AwaitingApproval))
+        if (Status is not (TaskStatus.AwaitingPlan or TaskStatus.AwaitingApproval or TaskStatus.PlanningFailed))
             throw new ConflictException("The plan can only be edited before approval.");
-        return this with { Plan = new(Required(text, 40000)), Status = TaskStatus.AwaitingApproval, Version = Version + 1 };
+        return this with { Plan = new(Required(text, 40000), (Plan?.Revision ?? 0) + 1, Plan?.BaseCommit), Status = TaskStatus.AwaitingApproval, Version = Version + 1 };
+    }
+    public WorkTask RequestPlanning()
+    {
+        if (Status is not (TaskStatus.AwaitingPlan or TaskStatus.AwaitingApproval or TaskStatus.PlanningFailed))
+            throw new ConflictException("Planning can only be requested before implementation approval.");
+        return this with { Status = TaskStatus.PlanningQueued, Version = Version + 1 };
+    }
+    public WorkTask ReceivePlan(string text, string? baseCommit = null)
+    {
+        if (Status != TaskStatus.Planning) throw new ConflictException("Task is not planning.");
+        return this with { Plan = new(Required(text, 40000), (Plan?.Revision ?? 0) + 1, baseCommit),
+            Status = TaskStatus.AwaitingApproval, Version = Version + 1 };
     }
     public WorkTask ApprovePlan()
     {
@@ -26,8 +42,28 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
     public WorkTask Cancel()
     {
         if (Status == TaskStatus.Cancelled) return this;
-        if (Status is TaskStatus.AwaitingReview or TaskStatus.Failed) throw new ConflictException("Finished tasks cannot be cancelled.");
+        if (Status is TaskStatus.AwaitingReview or TaskStatus.Failed or TaskStatus.Approved or TaskStatus.Merging or TaskStatus.Merged)
+            throw new ConflictException("Finished or merging tasks cannot be cancelled.");
         return this with { Status = TaskStatus.Cancelled, Version = Version + 1 };
+    }
+    public WorkTask Review(ReviewDecision decision, string? comments, string resultCommit)
+    {
+        if (!Enum.IsDefined(decision)) throw new ArgumentException("Unknown review decision.");
+        if (Status != TaskStatus.AwaitingReview) throw new ConflictException("Only tasks awaiting review can be reviewed.");
+        var commit = Required(resultCommit, 128);
+        var feedback = decision == ReviewDecision.Reject ? Required(comments, 20000) :
+            string.IsNullOrWhiteSpace(comments) ? null : Required(comments, 20000);
+        return this with { Status = decision == ReviewDecision.Approve ? TaskStatus.Approved : TaskStatus.Rejected,
+            RevisionInstructions = decision == ReviewDecision.Reject ? feedback : RevisionInstructions,
+            RevisionCommit = decision == ReviewDecision.Reject ? commit : RevisionCommit, Version = Version + 1 };
+    }
+    public WorkTask Retry(string? instructions)
+    {
+        if (Status is not (TaskStatus.Failed or TaskStatus.Rejected) || Plan is null)
+            throw new ConflictException("Only failed or rejected tasks with an approved plan can retry.");
+        var feedback = string.IsNullOrWhiteSpace(instructions) ? Required(RevisionInstructions, 20000) :
+            Required(string.IsNullOrWhiteSpace(RevisionInstructions) ? instructions : RevisionInstructions + "\n" + instructions, 20000);
+        return this with { Status = TaskStatus.Queued, RevisionInstructions = feedback, Version = Version + 1 };
     }
     public static string Required(string? value, int maxLength)
     {
@@ -38,7 +74,11 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
 }
 public sealed record TaskEvent(long Sequence, Guid TaskId, string Kind, string Message, DateTimeOffset CreatedAt);
 public sealed record TaskRun(Guid Id, Guid TaskId, string Status, string? WorktreePath, string? BaseCommit,
-    string? ResultCommit, string? Error, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt);
+    string? ResultCommit, string? Error, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, RunKind Kind = RunKind.Implementation,
+    AiSelection? Selection = null);
+public sealed record PlanRevision(Guid Id, Guid TaskId, Guid? RunId, int Revision, string Text, string Source, DateTimeOffset CreatedAt, string? BaseCommit = null);
 public sealed record TaskClaim(WorkTask Task, TaskRun Run);
+public sealed record TaskReview(Guid Id, Guid TaskId, Guid RunId, string ResultCommit, ReviewDecision Decision,
+    string? Comments, DateTimeOffset CreatedAt);
 public sealed class ConflictException(string message) : Exception(message);
 public sealed class MissingEntityException(string message) : Exception(message);

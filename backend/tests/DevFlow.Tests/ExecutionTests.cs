@@ -22,13 +22,17 @@ public sealed class ExecutionTests : IAsyncLifetime
     private sealed class FakeAgent : IAgentRunner
     {
         public List<TddPhase> Phases { get; } = [];
+        public string? RevisionInstructions { get; private set; }
         public Task ExecuteAsync(WorkTask t, Workspace w, Guid r, TddPhase p, CancellationToken ct)
-        { Phases.Add(p); return Task.CompletedTask; }
+        { Phases.Add(p); RevisionInstructions = t.RevisionInstructions; return Task.CompletedTask; }
     }
     private sealed class FakeWorkspace : IWorkspaceManager
     {
         public bool Snapshotted { get; private set; }
-        public Task<Workspace> CreateAsync(ProjectDefinition p, Guid r, CancellationToken ct) => Task.FromResult(new Workspace("worktree", "base"));
+        public string? SourceRef { get; private set; }
+        public Task AssertUnchangedAsync(Workspace w, CancellationToken ct) => Task.CompletedTask;
+        public Task<Workspace> CreateAsync(ProjectDefinition p, Guid r, CancellationToken ct)
+        { SourceRef = p.BaseBranch; return Task.FromResult(new Workspace("worktree", "base")); }
         public Task<string> SnapshotAsync(Workspace w, CancellationToken ct) { Snapshotted = true; return Task.FromResult("result"); }
     }
     private sealed class FakeValidator(params ValidationEvidence[] evidence) : IValidationRunner
@@ -109,6 +113,30 @@ public sealed class ExecutionTests : IAsyncLifetime
         Assert.Equal(1, validator.BaselineCalls);
         Assert.Empty(agent.Phases);
         Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+    }
+    [Fact] public async Task Retry_execution_starts_from_rejected_commit_with_review_feedback()
+    {
+        await new ExecutionCoordinator(store, new FakeAgent(), new FakeWorkspace(), new FakeValidator(Red, Green, Green)).ExecuteNextAsync();
+        var completed = (await store.GetTaskAsync(task.Id))!;
+        var run = (await store.ListRunsAsync(task.Id)).Single();
+        await store.ReviewAsync(task.Id, run.Id, "result", ReviewDecision.Reject, "Fix missing IDs", completed.Version);
+        var rejected = (await store.GetTaskAsync(task.Id))!;
+        await store.RetryAsync(task.Id, null, rejected.Version);
+        var workspace = new FakeWorkspace(); var agent = new FakeAgent();
+        await new ExecutionCoordinator(store, agent, workspace, new FakeValidator(Red, Green, Green)).ExecuteNextAsync();
+        Assert.Equal("result", workspace.SourceRef);
+        Assert.Equal("Fix missing IDs", agent.RevisionInstructions);
+        Assert.Equal(2, (await store.ListRunsAsync(task.Id)).Count);
+    }
+    [Fact] public async Task Implementation_uses_repository_snapshot_of_approved_plan()
+    {
+        await store.SaveTaskAsync(task.Cancel(), task.Version);
+        var planned = WorkTask.Create(task.ProjectId, "Planned API", "Build", "Tests").SetPlan("TDD");
+        planned = planned with { Plan = planned.Plan! with { BaseCommit = "planned-base" } };
+        await store.AddTaskAsync(planned.ApprovePlan());
+        var workspace = new FakeWorkspace();
+        await new ExecutionCoordinator(store, new FakeAgent(), workspace, new FakeValidator(Red, Green, Green)).ExecuteNextAsync();
+        Assert.Equal("planned-base", workspace.SourceRef);
     }
     [Fact] public async Task Trx_parser_distinguishes_test_failure_from_build_failure()
     {

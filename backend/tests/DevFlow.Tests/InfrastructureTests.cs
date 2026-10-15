@@ -56,11 +56,19 @@ public sealed class InfrastructureTests : IAsyncLifetime
         {
             var manager = new GitWorkspaceManager(process, root);
             var workspace = await manager.CreateAsync(new(Guid.NewGuid(), "Demo", directory, "main", ["test"]), Guid.NewGuid(), CancellationToken.None);
+            await manager.AssertUnchangedAsync(workspace, CancellationToken.None);
             await File.WriteAllTextAsync(Path.Combine(workspace.Path, "feature.txt"), "after");
+            await Assert.ThrowsAsync<ConflictException>(() => manager.AssertUnchangedAsync(workspace, CancellationToken.None));
             var result = await manager.SnapshotAsync(workspace, CancellationToken.None);
+            await Assert.ThrowsAsync<ConflictException>(() => manager.AssertUnchangedAsync(workspace, CancellationToken.None));
             Assert.NotEqual(workspace.BaseCommit, result);
             Assert.Equal("before", await File.ReadAllTextAsync(Path.Combine(directory, "feature.txt")));
             Assert.Equal("after", await File.ReadAllTextAsync(Path.Combine(workspace.Path, "feature.txt")));
+            var diff = await new GitResultDiffReader(process).ReadAsync(new(Guid.NewGuid(), "Demo", directory, "main", ["test"]),
+                new(Guid.NewGuid(), Guid.NewGuid(), "AwaitingReview", workspace.Path, workspace.BaseCommit, result, null,
+                    DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+            Assert.Contains("-before", diff.Patch);
+            Assert.Contains("+after", diff.Patch);
             await Git("worktree", "remove", workspace.Path);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
@@ -75,13 +83,15 @@ public sealed class InfrastructureTests : IAsyncLifetime
     [Fact] public async Task Codex_runner_passes_prompt_via_stdin_and_preserves_sandbox()
     {
         var process = new CaptureProcess();
-        var task = WorkTask.Create(Guid.NewGuid(), "API", "Build", "Tests").SetPlan("TDD").ApprovePlan();
+        var task = WorkTask.Create(Guid.NewGuid(), "API", "Build", "Tests").SetPlan("TDD").ApprovePlan()
+            with { RevisionInstructions = "Fix missing IDs" };
         await new CodexCliRunner(process, "codex.exe", directory).ExecuteAsync(task, new(directory, "base"), Guid.NewGuid(), TddPhase.Red, CancellationToken.None);
         Assert.Contains("workspace-write", process.Arguments);
         Assert.Contains("--json", process.Arguments);
         Assert.Equal("-", process.Arguments.Last());
         Assert.Contains("Red", process.Input);
         Assert.Contains("Tests", process.Input);
+        Assert.Contains("Fix missing IDs", process.Input);
     }
     [Fact] public async Task Codex_nonzero_exit_is_failure()
     {

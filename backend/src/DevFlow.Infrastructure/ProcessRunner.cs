@@ -4,6 +4,7 @@ using System.Text;
 namespace DevFlow.Infrastructure;
 public sealed class ProcessRunner : IProcessRunner
 {
+    public const string TruncationMarker = "\n[Output truncated at 4 MiB.]";
     public async Task<ProcessResult> RunAsync(string executable, IReadOnlyList<string> arguments, string workingDirectory,
         string? standardInput, CancellationToken ct)
     {
@@ -41,7 +42,7 @@ public sealed class ProcessRunner : IProcessRunner
             text.Append(buffer, 0, retained);
             if (retained < count) truncated = true;
         }
-        if (truncated) text.Append("\n[Output truncated at 4 MiB.]");
+        if (truncated) text.Append(TruncationMarker);
         return text.ToString();
     }
 }

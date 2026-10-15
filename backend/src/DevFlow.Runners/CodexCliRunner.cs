@@ -21,12 +21,18 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
             Approved plan: {task.Plan?.Text}
+            Review feedback and retry instructions: {task.RevisionInstructions}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-prompt.txt"), prompt, ct);
+        var selection = AiSelection.Normalize(task.Ai?.Implementation);
+        await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-selection.json"), System.Text.Json.JsonSerializer.Serialize(selection), ct);
+        List<string> arguments = ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral"];
+        if (selection.Model != null) arguments.AddRange(["--model", selection.Model]);
+        arguments.AddRange(["-C", workspace.Path, "-"]);
         var result = await process.RunAsync(executable,
-            ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral", "-C", workspace.Path, "-"],
+            arguments,
             workspace.Path, prompt, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-agent.jsonl"), result.StandardOutput, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-agent.stderr.log"), result.StandardError, ct);

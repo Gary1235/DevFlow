@@ -34,9 +34,9 @@ public sealed class ApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var id = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
         var url = $"/api/tasks/{id}";
-        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync(url + "/approve-plan", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(url + "/approve-plan", new { expectedVersion = 0, planRevision = 1 })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(url + "/plan", new { text = "Write failing tests first" })).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync(url + "/approve-plan", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(url + "/approve-plan", new { expectedVersion = 1, planRevision = 1 })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsync(url + "/cancel", null)).StatusCode);
         var task = await client.GetFromJsonAsync<JsonElement>(url);
         Assert.Equal("Cancelled", task.GetProperty("status").GetString());

@@ -1,1 +1,3 @@
-<Project Sdk="Microsoft.NET.Sdk" />
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup><ProjectReference Include="../DevFlow.Core/DevFlow.Core.csproj" /></ItemGroup>
+</Project>

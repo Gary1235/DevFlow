@@ -30,4 +30,11 @@ public sealed class GitWorkspaceManager(IProcessRunner process, string root) : I
         if (result.ExitCode != 0) throw new InvalidOperationException("Git failed: " + result.StandardError);
         return result.StandardOutput;
     }
+    public async Task AssertUnchangedAsync(Workspace workspace, CancellationToken ct)
+    {
+        var head = (await Git(workspace.Path, ct, "rev-parse", "HEAD")).Trim();
+        var status = await Git(workspace.Path, ct, "status", "--porcelain=v1", "--untracked-files=all");
+        if (head != workspace.BaseCommit || !string.IsNullOrWhiteSpace(status))
+            throw new ConflictException("Planning changed the worktree or commit.");
+    }
 }

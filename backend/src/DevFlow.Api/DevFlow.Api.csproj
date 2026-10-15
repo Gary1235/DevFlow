@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><StaticWebAssetsEnabled>false</StaticWebAssetsEnabled></PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../DevFlow.Core/DevFlow.Core.csproj" />
     <ProjectReference Include="../DevFlow.Contracts/DevFlow.Contracts.csproj" />
     <ProjectReference Include="../DevFlow.Infrastructure/DevFlow.Infrastructure.csproj" />
+    <ProjectReference Include="../DevFlow.Runners/DevFlow.Runners.csproj" />
   </ItemGroup>
+  <ItemGroup><Content Include="../../../frontend/dist/**/*" Link="ui/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
 </Project>

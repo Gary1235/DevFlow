@@ -5,7 +5,7 @@ using Status = DevFlow.Core.TaskStatus;
 namespace DevFlow.Infrastructure;
 
 // Mutations and events commit together; BEGIN IMMEDIATE serializes queue claims.
-public sealed class SqliteTaskStore(string databasePath) : ITaskStore
+public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
 {
     private readonly string path = Path.GetFullPath(databasePath);
     private SqliteConnection Open(CancellationToken ct)
@@ -31,7 +31,19 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
             CREATE TABLE IF NOT EXISTS Events(Sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 TaskId TEXT NOT NULL REFERENCES Tasks(Id), Kind TEXT NOT NULL, Message TEXT NOT NULL, CreatedAt TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_Events_Task ON Events(TaskId, Sequence);
+            CREATE TABLE IF NOT EXISTS Reviews(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
+                RunId TEXT NOT NULL UNIQUE REFERENCES Runs(Id), Payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_Reviews_Task ON Reviews(TaskId);
+            CREATE TABLE IF NOT EXISTS Merges(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
+                RepositoryKey TEXT NOT NULL, State TEXT NOT NULL, Payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_Merges_Task ON Merges(TaskId);
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_Merges_ActiveRepository ON Merges(RepositoryKey)
+                WHERE State IN ('Pending','Uncertain');
+            CREATE TABLE IF NOT EXISTS Plans(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
+                Revision INTEGER NOT NULL, Payload TEXT NOT NULL, UNIQUE(TaskId,Revision));
             """);
+        foreach (var task in ReadList<WorkTask>(c, "SELECT Payload FROM Tasks"))
+            if (task.Plan != null) RecordPlan(c, null, task, null, "Legacy", ignoreExisting: true);
         return Task.CompletedTask;
     }
     public Task AddProjectAsync(ProjectDefinition p, CancellationToken ct = default)
@@ -53,6 +65,7 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
             ("$id", t.Id.ToString()), ("$project", t.ProjectId.ToString()), ("$status", (int)t.Status),
             ("$version", t.Version), ("$created", t.CreatedAt.ToString("O")), ("$payload", JsonSerializer.Serialize(t)));
         Event(c, tx, t.Id, "TaskCreated", t.Status.ToString());
+        if (t.Plan != null) RecordPlan(c, tx, t, null, "Manual");
         tx.Commit();
         return Task.CompletedTask;
     }
@@ -69,6 +82,7 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
         if (current == t) return Task.CompletedTask;
         if (t.Version != expectedVersion + 1) throw new ConflictException("Invalid task version.");
         UpdateTask(c, tx, t, expectedVersion);
+        if (t.Plan != current.Plan && t.Plan != null) RecordPlan(c, tx, t, null, "Manual");
         Event(c, tx, t.Id, "TaskUpdated", t.Status.ToString());
         tx.Commit();
         return Task.CompletedTask;
@@ -83,7 +97,8 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
         var current = JsonSerializer.Deserialize<WorkTask>(payload)!;
         var running = current with { Status = Status.Running, Version = current.Version + 1 };
         UpdateTask(c, tx, running, current.Version);
-        var run = new TaskRun(Guid.NewGuid(), current.Id, "Running", null, null, null, null, DateTimeOffset.UtcNow, null);
+        var run = new TaskRun(Guid.NewGuid(), current.Id, "Running", null, null, null, null, DateTimeOffset.UtcNow, null,
+            Selection: AiSelection.Normalize(current.Ai?.Implementation));
         Execute(c, tx, "INSERT INTO Runs VALUES($id,$task,$payload)", ("$id", run.Id.ToString()),
             ("$task", run.TaskId.ToString()), ("$payload", JsonSerializer.Serialize(run)));
         Event(c, tx, current.Id, "RunStarted", run.Id.ToString());
@@ -95,6 +110,7 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
         using var c = Open(ct);
         using var tx = c.BeginTransaction();
         var run = ReadOne<TaskRun>(c, tx, "Runs", runId) ?? throw new MissingEntityException("Run not found.");
+        if (run.Kind != RunKind.Implementation) throw new ConflictException("Use planning completion for planning runs.");
         if (run.FinishedAt is not null) throw new ConflictException("Run already finished.");
         var task = ReadOne<WorkTask>(c, tx, "Tasks", run.TaskId)!;
         var status = task.Status == Status.Cancelled ? Status.Cancelled : success ? Status.AwaitingReview : Status.Failed;
@@ -129,8 +145,11 @@ public sealed class SqliteTaskStore(string databasePath) : ITaskStore
         foreach (var task in await ListTasksAsync(ct))
             foreach (var run in await ListRunsAsync(task.Id, ct))
                 if (run.FinishedAt is null)
-                    await CompleteRunAsync(run.Id, false, run.WorktreePath, run.BaseCommit, run.ResultCommit,
-                        "Worker interrupted; inspect retained worktree and any orphan process before retrying.", ct);
+                {
+                    const string error = "Worker interrupted; inspect retained worktree and any orphan process before retrying.";
+                    if (run.Kind == RunKind.Planning) await CompletePlanningAsync(run.Id, null, error, ct);
+                    else await CompleteRunAsync(run.Id, false, run.WorktreePath, run.BaseCommit, run.ResultCommit, error, ct);
+                }
     }
     public Task SetWorkspaceAsync(Guid runId, Workspace workspace, CancellationToken ct = default)
     {

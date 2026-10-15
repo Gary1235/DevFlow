@@ -2,10 +2,28 @@ using System.Text.Json.Serialization;
 using DevFlow.Contracts;
 using DevFlow.Core;
 using DevFlow.Infrastructure;
+using DevFlow.Api;
+using DevFlow.Runners;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls(builder.Configuration["DevFlow:ApiUrl"] ?? "http://127.0.0.1:5180");
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
+builder.Services.AddSingleton(new CliRegistry(builder.Configuration["DevFlow:CodexExecutable"], builder.Configuration["DevFlow:GeminiExecutable"],
+    builder.Configuration["DevFlow:NodeExecutable"],
+    builder.Configuration.GetSection("DevFlow:Models:Codex").GetChildren().Select(c => c.Value!).ToArray(),
+    builder.Configuration.GetSection("DevFlow:Models:Gemini").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Gemini").GetChildren().Select(c => c.Value!).ToArray() : null,
+    builder.Configuration["DevFlow:ClaudeExecutable"],
+    builder.Configuration.GetSection("DevFlow:Models:Claude").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Claude").GetChildren().Select(c => c.Value!).ToArray() : null));
+var cliControl = Path.GetFullPath(builder.Configuration["DevFlow:CliControlRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "cli-control"));
+builder.Services.AddSingleton(sp => new CliDiagnostics(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), cliControl));
+builder.Services.AddSingleton<ILoginTerminalLauncher, WindowsLoginTerminalLauncher>();
+builder.Services.AddSingleton(sp => new CliLoginManager(sp.GetRequiredService<CliRegistry>(), sp.GetRequiredService<ILoginTerminalLauncher>(), cliControl));
+builder.Services.AddSingleton<IResultDiffReader, GitResultDiffReader>();
+builder.Services.AddSingleton<IGitMergeService, GitMergeService>();
+builder.Services.AddSingleton<MergeCoordinator>();
+builder.Services.AddSingleton<IRunArtifactReader>(_ => new RunArtifactReader(builder.Configuration["DevFlow:ArtifactsRoot"] ??
+    Path.Combine(Environment.CurrentDirectory, ".data", "artifacts")));
 builder.Services.AddSingleton<ITaskStore>(_ => new SqliteTaskStore(
     builder.Configuration["DevFlow:DatabasePath"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "devflow.db")));
 var app = builder.Build();
@@ -13,9 +31,9 @@ await app.Services.GetRequiredService<ITaskStore>().InitializeAsync();
 app.Use(async (context, next) =>
 {
     try { await next(context); }
-    catch (Exception ex) when (ex is ArgumentException or ConflictException or MissingEntityException)
+    catch (Exception ex) when (ex is ArgumentException or ConflictException or MissingEntityException or MergeUncertainException)
     {
-        var code = ex is ConflictException ? 409 : ex is MissingEntityException ? 404 : 400;
+        var code = ex is MergeUncertainException ? 503 : ex is ConflictException ? 409 : ex is MissingEntityException ? 404 : 400;
         await Results.Problem(statusCode: code, title: ex.Message).ExecuteAsync(context);
     }
 });
@@ -29,7 +47,7 @@ app.MapPost("/api/projects", async (CreateProjectRequest input, ITaskStore store
     var branch = WorkTask.Required(input.BaseBranch, 200);
     if (branch.StartsWith('-')) throw new ArgumentException("Invalid base branch.");
     DotnetValidationRunner.ValidateArguments(input.ValidationArguments);
-    var project = new ProjectDefinition(Guid.NewGuid(), name, path, branch, input.ValidationArguments);
+    var project = new ProjectDefinition(Guid.NewGuid(), name, path, branch, input.ValidationArguments, AiConfiguration.Resolve(input.AiDefaults));
     await store.AddProjectAsync(project, ct);
     return Results.Created($"/api/projects/{project.Id}", project);
 });
@@ -38,7 +56,10 @@ app.MapGet("/api/projects/{id:guid}", async (Guid id, ITaskStore store, Cancella
 app.MapGet("/api/tasks", (ITaskStore store, CancellationToken ct) => store.ListTasksAsync(ct));
 app.MapPost("/api/tasks", async (CreateTaskRequest input, ITaskStore store, CancellationToken ct) =>
 {
-    var task = WorkTask.Create(input.ProjectId, input.Title, input.Description, input.AcceptanceCriteria);
+    var project = await store.GetProjectAsync(input.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
+    var task = WorkTask.Create(input.ProjectId, input.Title, input.Description, input.AcceptanceCriteria) with
+    { Ai = AiConfiguration.Resolve(project.AiDefaults, input.Planning, input.Implementation) };
+    if (input.AutoPlan) task = task.RequestPlanning();
     await store.AddTaskAsync(task, ct);
     return Results.Created($"/api/tasks/{task.Id}", task);
 });
@@ -46,13 +67,17 @@ app.MapGet("/api/tasks/{id:guid}", async (Guid id, ITaskStore store, Cancellatio
 app.MapPost("/api/tasks/{id:guid}/plan", async (Guid id, SetPlanRequest input, ITaskStore store, CancellationToken ct) =>
 {
     var task = await Find(id, store, ct);
+    if (input.ExpectedVersion.HasValue && input.ExpectedVersion != task.Version)
+        throw new ConflictException("Task changed; reload the current plan before saving editor changes.");
     var updated = task.SetPlan(input.Text);
     await store.SaveTaskAsync(updated, task.Version, ct);
     return Results.Ok(updated);
 });
-app.MapPost("/api/tasks/{id:guid}/approve-plan", async (Guid id, ITaskStore store, CancellationToken ct) =>
+app.MapPost("/api/tasks/{id:guid}/approve-plan", async (Guid id, ApprovePlanRequest input, ITaskStore store, CancellationToken ct) =>
 {
     var task = await Find(id, store, ct);
+    if (task.Version != input.ExpectedVersion || task.Plan?.Revision != input.PlanRevision)
+        throw new ConflictException("Task or plan revision changed; review the current plan before approval.");
     var updated = task.ApprovePlan();
     await store.SaveTaskAsync(updated, task.Version, ct);
     return Results.Ok(updated);
@@ -72,6 +97,10 @@ app.MapGet("/api/tasks/{id:guid}/events", async (Guid id, long? after, ITaskStor
     await Find(id, store, ct);
     return Results.Ok(await store.GetEventsAsync(id, after ?? 0, ct));
 });
+app.MapReviewEndpoints();
+app.MapMergeEndpoints();
+app.MapPlanningArtifactEndpoints();
+app.MapAiEndpoints();
 app.Run();
 static async Task<WorkTask> Find(Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetTaskAsync(id, ct) ?? throw new MissingEntityException("Task not found.");

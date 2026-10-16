@@ -10,6 +10,7 @@ public sealed class GeminiCliRunner(IProcessRunner process, string executable, s
             TddPhase.Red => "Add meaningful failing behavior tests only. Do not change implementation. Preserve existing tests.",
             TddPhase.Green => "Implement the smallest correct change. Do not remove, skip or weaken tests.",
             TddPhase.Refactor => "Refactor where useful, preserving behavior and every test.",
+            TddPhase.Implementation => "Implement the approved requirements and appropriate tests. Preserve existing tests and behavior.",
             _ => throw new ArgumentOutOfRangeException(nameof(phase))
         };
         await Invoke(task, workspace, runId, phase.ToString(), false,
@@ -17,10 +18,10 @@ public sealed class GeminiCliRunner(IProcessRunner process, string executable, s
     }
     public async Task<string> PlanAsync(WorkTask task, Workspace workspace, Guid runId, CancellationToken ct)
     {
-        var plan = await Invoke(task, workspace, runId, "Planning", true,
-            "Analyze repository instructions and source. Do not modify files. Return an implementation plan for human approval with affected files, contracts, meaningful failing tests, steps, validation commands, assumptions and unresolved questions. Previous plan: " + task.Plan?.Text, ct);
+        var plan = await Invoke(task, workspace, runId, task.ArtifactStage, true,
+            (task.ReadOnlyInstruction ?? "Analyze repository instructions and source. Return an implementation plan for human approval with affected files, contracts, meaningful failing tests, steps, validation commands, assumptions and unresolved questions.") + " Do not modify files. Previous plan: " + task.Plan?.Text, ct);
         plan = WorkTask.Required(plan, 40000);
-        await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), "Planning-result.json"), JsonSerializer.Serialize(new { plan }), ct);
+        await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage + "-result.json"), JsonSerializer.Serialize(new { plan }), ct);
         return plan;
     }
     private async Task<string> Invoke(WorkTask task, Workspace workspace, Guid runId, string phase, bool planning, string instruction, CancellationToken ct)
@@ -34,6 +35,7 @@ public sealed class GeminiCliRunner(IProcessRunner process, string executable, s
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
+            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation")}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);

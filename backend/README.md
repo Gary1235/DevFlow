@@ -88,9 +88,13 @@ Gemini 完成 Google 登入後輸入 /quit，再按連線測試；退出 Gemini 
 
 | Method | Path | 用途 |
 | --- | --- | --- |
-| GET | /api/ai/providers | CLI 安裝狀態與設定的模型清單 |
+| GET | /api/ai/providers | CLI 安裝狀態與模型目錄，modelDetails 含推理選項；Codex 由 app-server 讀取並快取，其他 CLI 使用別名／設定清單 |
+| GET | /api/storage | 實際資料路徑、資料庫／執行產物／工作副本容量，需要本機同源動作標頭 |
+| POST | /api/storage/preview | 依 olderThanDays、artifacts、worktrees 產生五分鐘有效的清理預覽，不刪除資料 |
+| POST | /api/storage/cleanup | 以 previewId 與 keys 確認清理，最多 100 項，重新核對狀態與路徑並保留摘要紀錄 |
+| POST | /api/projects/pick-folder | 在 API 的 Windows 桌面開啟原生資料夾選擇器；選擇回傳 path，取消回傳 null，需要本機同源動作標頭 |
 | GET | /api/ai/{provider}/diagnostics | CLI 版本與免額度登入診斷 |
-| POST | /api/ai/{provider}/probe | 明確呼叫模型的連線測試，使用模型額度 |
+| POST | /api/ai/{provider}/probe | 明確呼叫模型的連線測試，使用模型額度；選擇可含 reasoningEffort（null 沿用 CLI 預設） |
 | POST | /api/ai/{provider}/login | 開啟官方登入終端；body 為 {"mode":"browser"} 或 Codex device |
 | GET | /api/ai/logins/{id} | 登入作業狀態 |
 | POST | /api/ai/logins/{id}/cancel | 取消所屬登入終端 |

@@ -10,6 +10,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             TddPhase.Red => "Write meaningful failing behavior tests only. Do not implement the feature. Preserve existing tests.",
             TddPhase.Green => "Implement the smallest correct change that passes tests. Do not remove, skip or weaken tests.",
             TddPhase.Refactor => "Refactor only where useful, preserving behavior and every test.",
+            TddPhase.Implementation => "Implement the approved requirements and appropriate tests. Preserve existing tests and behavior.",
             _ => throw new ArgumentOutOfRangeException(nameof(phase))
         };
         await Invoke(task, workspace, runId, phase.ToString(), false,
@@ -17,10 +18,10 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
     }
     public async Task<string> PlanAsync(WorkTask task, Workspace workspace, Guid runId, CancellationToken ct)
     {
-        var plan = await Invoke(task, workspace, runId, "Planning", true,
-            "Read repository instructions and source, including AGENTS.md and CLAUDE.md. Do not edit files. Return an implementation plan for human approval: affected files, contracts, meaningful failing tests, steps, validation commands, risks, assumptions and questions. Previous plan: " + task.Plan?.Text, ct);
+        var plan = await Invoke(task, workspace, runId, task.ArtifactStage, true,
+            (task.ReadOnlyInstruction ?? "Read repository instructions and source, including AGENTS.md and CLAUDE.md. Return an implementation plan for human approval: affected files, contracts, meaningful failing tests, steps, validation commands, risks, assumptions and questions.") + " Do not edit files. Previous plan: " + task.Plan?.Text, ct);
         plan = WorkTask.Required(plan, 40000);
-        await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), "Planning-result.json"), JsonSerializer.Serialize(new { plan }), ct);
+        await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage + "-result.json"), JsonSerializer.Serialize(new { plan }), ct);
         return plan;
     }
     internal static List<string> Arguments(AiSelection selection, bool planning, bool probe = false)
@@ -30,6 +31,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             "--permission-mode", planning ? "plan" : "acceptEdits", "--tools", probe ? "" : planning ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write",
             "--disallowedTools", "mcp__*", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}"];
         if (selection.Model != null) args.AddRange(["--model", selection.Model]);
+        CliReasoning.AddArguments(args, selection);
         return args;
     }
     internal static string ParseResult(string output)
@@ -55,6 +57,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
+            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation")}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N")); Directory.CreateDirectory(directory);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-prompt.txt"), prompt, ct);

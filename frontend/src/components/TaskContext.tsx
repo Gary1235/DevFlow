@@ -1,0 +1,11 @@
+import {selectionText,shortCommit,formatDate} from '../domain';
+import type {Run,WorkTask} from '../types';
+import {stageLabels} from './TaskOptions';
+export function TaskContext({task:t}:{task:WorkTask}){
+  return <article className="panel task-context"><h2>規則與工作流程</h2><div className="flow-tags">{t.workflow?.planningEnabled!==false&&<><span className="chip neutral">規劃 · {selectionText(t.ai?.planning)}</span><span>→</span></>}<span className="chip blue">實作 · {selectionText(t.ai?.implementation)}</span>{t.workflow?.reviewers?.map((r,i)=><span key={i} className="flow-stage"><span>→</span><span className="chip neutral">驗收 {i+1} · {selectionText(r)}</span></span>)}<span>→</span><span className="chip amber">人工驗收</span></div><p className="muted">{t.policy?.tdd===false?'一般實作':'TDD 模式'} · 自動修正上限 {t.workflow?.maxReviewRetries||0} 次 · 已使用 {t.autoReviewAttempt||0} 次</p>{t.sourceDiscussionId&&<p><a className="text-link" href={'#discussion/'+t.sourceDiscussionId}>查看來源討論 →</a></p>}<details><summary>查看本次規則與允許範圍</summary>{!t.rules?.length&&!t.taskRules&&<p className="muted">未指定額外文字規則。</p>}{t.rules?.map(r=><div className="history-item" key={r.id}><strong>{r.name} · v{r.version}</strong><p>{r.stages.map(s=>stageLabels[s]).join(' · ')}</p><p className="prose">{r.content}</p></div>)}{t.taskRules&&<><h3>本次專屬規則</h3><p className="prose">{t.taskRules}</p></>}<h3>允許編輯路徑</h3><p className="prose">{t.policy?.allowedPaths?.length?t.policy.allowedPaths.join('\n'):'整個 Repository'}</p></details></article>;
+}
+export function AiReviewReports({run}:{run?:Run}){
+  if(!run?.aiReviews?.length)return null;
+  const names:Record<string,string>={Pass:'通過',NeedsChanges:'需要修正',Uncertain:'無法判定'};
+  return <article className="panel"><h2>AI 驗收報告</h2><p className="muted">這些報告提供審核依據；最終仍需由你核准成果。</p>{run.aiReviews.map(r=><div className="history-item" key={r.id}><div className="flow-tags"><span className={'chip '+(r.verdict==='Pass'?'success':'amber')}>{names[r.verdict]||r.verdict}</span><span className="chip neutral">驗收 {r.stage} · {selectionText(r.selection)}</span></div><p>第 {r.attempt} 輪 · 成果 {shortCommit(r.resultCommit)} · {formatDate(r.createdAt)}</p><p className="prose">{r.summary}</p></div>)}</article>;
+}

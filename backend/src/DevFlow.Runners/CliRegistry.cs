@@ -2,7 +2,9 @@ using DevFlow.Core;
 namespace DevFlow.Runners;
 
 public sealed record CliCommand(string Executable, string[] PrefixArguments);
-public sealed record CliProvider(string Id, bool Installed, string? Executable, string[] Models, bool ModelsVerified = false);
+public sealed record CliModelOption(string Id, string DisplayName, string[] ReasoningEfforts, string? DefaultReasoningEffort = null, bool IsDefault = false);
+public sealed record CliProvider(string Id, bool Installed, string? Executable, string[] Models, bool ModelsVerified = false, CliModelOption[]? ModelDetails = null,
+    string? ConfiguredDefaultModel = null, string? ModelCatalogState = null, string? ModelCatalogMessage = null);
 public sealed class CliRegistry
 {
     private readonly Dictionary<string, CliCommand?> commands;
@@ -25,7 +27,16 @@ public sealed class CliRegistry
         };
     }
     public IReadOnlyList<CliProvider> List() => commands.Select(p => new CliProvider(p.Key,
-        p.Value != null, p.Value?.Executable, models[p.Key])).ToArray();
+        p.Value != null, p.Value?.Executable, models[p.Key], ModelDetails: models[p.Key].Select(m => new CliModelOption(m, m, KnownEfforts(p.Key, m))).ToArray())).ToArray();
+    private static string[] KnownEfforts(string provider, string model)
+    {
+        if (provider != "claude") return [];
+        if (model is "opus" or "sonnet" or "haiku") return ["low", "medium", "high", "xhigh", "max"];
+        var id = model.ToLowerInvariant().Replace('.', '-');
+        if (System.Text.RegularExpressions.Regex.IsMatch(id, @"\A(?:claude-)?(?:opus|sonnet)-4-6(?:-|\z)")) return ["low", "medium", "high", "max"];
+        if (System.Text.RegularExpressions.Regex.IsMatch(id, @"\A(?:claude-)?(?:opus-4-[78]|(?:opus|sonnet|fable)-5|haiku-5-5)(?:-|\z)")) return ["low", "medium", "high", "xhigh", "max"];
+        return [];
+    }
     public CliCommand Require(string provider)
     {
         provider = AiSelection.Normalize(new(provider)).Provider;

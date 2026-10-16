@@ -30,4 +30,5 @@ public interface ITaskStore
     Task<TaskClaim?> ClaimPlanningAsync(CancellationToken ct = default);
     Task CompletePlanningAsync(Guid runId, string? plan, string? error, CancellationToken ct = default);
     Task<IReadOnlyList<PlanRevision>> ListPlansAsync(Guid taskId, CancellationToken ct = default);
+    Task RecordAiReviewAsync(Guid runId, AiAcceptanceReport report, CancellationToken ct = default);
 }

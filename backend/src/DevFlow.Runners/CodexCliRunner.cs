@@ -9,6 +9,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             TddPhase.Red => "Write meaningful failing tests for the acceptance criteria. Do not implement the feature yet. Preserve existing tests.",
             TddPhase.Green => "Implement the smallest correct change that passes the tests. Do not remove, skip, or weaken any tests.",
             TddPhase.Refactor => "Refactor only where useful while preserving behavior and every test. If no refactor is needed, leave the code as is.",
+            TddPhase.Implementation => "Implement the approved requirements and appropriate tests. Preserve existing tests and behavior. The orchestrator validates the result.",
             _ => throw new ArgumentOutOfRangeException(nameof(phase))
         };
         var prompt = $"""
@@ -22,6 +23,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             Acceptance criteria: {task.AcceptanceCriteria}
             Approved plan: {task.Plan?.Text}
             Review feedback and retry instructions: {task.RevisionInstructions}
+            {TaskInstructions.For(task, "Implementation")}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);
@@ -30,6 +32,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-selection.json"), System.Text.Json.JsonSerializer.Serialize(selection), ct);
         List<string> arguments = ["exec", "--sandbox", "workspace-write", "--json", "--ephemeral"];
         if (selection.Model != null) arguments.AddRange(["--model", selection.Model]);
+        CliReasoning.AddArguments(arguments, selection);
         arguments.AddRange(["-C", workspace.Path, "-"]);
         var result = await process.RunAsync(executable,
             arguments,

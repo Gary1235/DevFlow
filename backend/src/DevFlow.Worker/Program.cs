@@ -32,6 +32,8 @@ builder.Services.AddSingleton<IAgentRunner>(sp => sp.GetRequiredService<RoutedCl
 builder.Services.AddSingleton<IValidationRunner>(sp => new DotnetValidationRunner(sp.GetRequiredService<IProcessRunner>(), artifacts));
 builder.Services.AddSingleton<ExecutionCoordinator>();
 builder.Services.AddSingleton<IPlanningRunner>(sp => sp.GetRequiredService<RoutedCliRunner>());
+builder.Services.AddSingleton<IResultDiffReader, GitResultDiffReader>();
+builder.Services.AddSingleton<IExecutionPolicyGuard, GitExecutionPolicyGuard>();
 builder.Services.AddSingleton<PlanningCoordinator>();
 builder.Services.AddSingleton(new WorkerSettings(timeoutSeconds));
 builder.Services.AddHostedService<TaskWorker>();

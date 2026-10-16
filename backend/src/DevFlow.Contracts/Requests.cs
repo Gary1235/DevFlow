@@ -2,7 +2,9 @@ using DevFlow.Core;
 namespace DevFlow.Contracts;
 public sealed record CreateProjectRequest(string Name, string RepositoryPath, string BaseBranch, string[] ValidationArguments, AiConfiguration? AiDefaults = null);
 public sealed record CreateTaskRequest(Guid ProjectId, string Title, string Description, string AcceptanceCriteria, bool AutoPlan = false,
-    AiSelection? Planning = null, AiSelection? Implementation = null);
+    AiSelection? Planning = null, AiSelection? Implementation = null, Guid[]? RuleIds = null,
+    string? TaskRules = null, ExecutionPolicy? Policy = null, WorkflowDefinition? Workflow = null,
+    Guid? SourceDiscussionId = null, Guid? SourceDraftId = null, bool AcknowledgeOpenQuestions = false);
 public sealed record SetProjectAiRequest(AiConfiguration AiDefaults, int ExpectedVersion);
 public sealed record SetPlanRequest(string Text, int? ExpectedVersion = null);
 public sealed record ReviewTaskRequest(Guid RunId, string ResultCommit, string Decision, int ExpectedVersion, string? Comments = null);

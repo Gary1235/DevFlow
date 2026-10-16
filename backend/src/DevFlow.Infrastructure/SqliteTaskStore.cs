@@ -8,6 +8,15 @@ namespace DevFlow.Infrastructure;
 public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
 {
     private readonly string path = Path.GetFullPath(databasePath);
+    public string DatabasePath => path;
+
+    public Task<DateTimeOffset> StorageLastActivityAsync(Guid taskId, CancellationToken ct = default)
+    {
+        using var c = Open(ct);
+        using var cmd = Command(c, null, "SELECT CreatedAt FROM Events WHERE TaskId=$id AND Kind <> 'StorageCleaned' ORDER BY Sequence DESC LIMIT 1", ("$id", taskId.ToString()));
+        var value = cmd.ExecuteScalar() as string;
+        return Task.FromResult(value is null ? DateTimeOffset.MaxValue : DateTimeOffset.Parse(value));
+    }
     private SqliteConnection Open(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -41,7 +50,13 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
                 WHERE State IN ('Pending','Uncertain');
             CREATE TABLE IF NOT EXISTS Plans(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
                 Revision INTEGER NOT NULL, Payload TEXT NOT NULL, UNIQUE(TaskId,Revision));
+            CREATE TABLE IF NOT EXISTS RuleLibrary(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS Discussions(Id TEXT PRIMARY KEY, ProjectId TEXT NOT NULL REFERENCES Projects(Id), Payload TEXT NOT NULL);
             """);
+        var tdd = new RuleDefinition(Guid.Parse("90d978ec-8485-4e0c-a90d-31a333881955"), "TDD 模式",
+            "依序執行 Baseline、Red、Green、Refactor；保留既有測試，不得刪除、略過或弱化斷言。Red 必須有實際失敗測試，後續階段必須通過。",
+            ["Planning", "Implementation", "Acceptance"], RequiresTdd: true);
+        Execute(c, null, "INSERT OR IGNORE INTO RuleLibrary VALUES($id,$payload)", ("$id", tdd.Id.ToString()), ("$payload", JsonSerializer.Serialize(tdd)));
         foreach (var task in ReadList<WorkTask>(c, "SELECT Payload FROM Tasks"))
             if (task.Plan != null) RecordPlan(c, null, task, null, "Legacy", ignoreExisting: true);
         return Task.CompletedTask;
@@ -114,11 +129,20 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
         if (run.FinishedAt is not null) throw new ConflictException("Run already finished.");
         var task = ReadOne<WorkTask>(c, tx, "Tasks", run.TaskId)!;
         var status = task.Status == Status.Cancelled ? Status.Cancelled : success ? Status.AwaitingReview : Status.Failed;
-        var finished = run with { Status = status.ToString(), WorktreePath = worktree, BaseCommit = baseCommit,
+        var lastReview = run.AiReviews?.LastOrDefault();
+        var correction = status == Status.AwaitingReview && lastReview?.Verdict == "NeedsChanges" && task.AutoReviewAttempt < (task.Workflow?.MaxReviewRetries ?? 0);
+        var finished = run with { Status = correction ? "AiChangesRequested" : status.ToString(), WorktreePath = worktree, BaseCommit = baseCommit,
             ResultCommit = resultCommit, Error = error, FinishedAt = DateTimeOffset.UtcNow };
         Execute(c, tx, "UPDATE Runs SET Payload=$payload WHERE Id=$id", ("$payload", JsonSerializer.Serialize(finished)), ("$id", runId.ToString()));
-        if (task.Status != Status.Cancelled) UpdateTask(c, tx, task with { Status = status, Version = task.Version + 1 }, task.Version);
-        Event(c, tx, task.Id, "RunFinished", status.ToString());
+        if (task.Status != Status.Cancelled)
+        {
+            var updated = task with { Status = status, Version = task.Version + 1 };
+            if (correction) updated = updated with { Status = Status.Queued, AutoReviewAttempt = task.AutoReviewAttempt + 1,
+                RevisionCommit = resultCommit, RevisionInstructions = "AI acceptance correction:\n" + lastReview!.Summary };
+            UpdateTask(c, tx, updated, task.Version);
+            if (correction) Event(c, tx, task.Id, "AiCorrectionQueued", "AI requested changes; queued bounded correction round " + updated.AutoReviewAttempt);
+        }
+        Event(c, tx, task.Id, "RunFinished", finished.Status);
         tx.Commit();
         return Task.CompletedTask;
     }

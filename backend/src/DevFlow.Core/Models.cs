@@ -4,12 +4,19 @@ public enum TaskStatus { AwaitingPlan, AwaitingApproval, Queued, Running, Awaiti
 public enum RunKind { Implementation, Planning }
 public enum ReviewDecision { Approve, Reject }
 public sealed record ProjectDefinition(Guid Id, string Name, string RepositoryPath, string BaseBranch, string[] ValidationArguments,
-    AiConfiguration? AiDefaults = null, int Version = 0);
+    AiConfiguration? AiDefaults = null, int Version = 0, Guid[]? DefaultRuleIds = null);
 public sealed record PlanDefinition(string Text, int Revision = 1, string? BaseCommit = null);
 public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Description, string AcceptanceCriteria,
     TaskStatus Status, PlanDefinition? Plan, int Version, DateTimeOffset CreatedAt,
-    string? RevisionInstructions = null, string? RevisionCommit = null, AiConfiguration? Ai = null)
+    string? RevisionInstructions = null, string? RevisionCommit = null, AiConfiguration? Ai = null,
+    RuleSnapshot[]? Rules = null, string? TaskRules = null, ExecutionPolicy? Policy = null,
+    WorkflowDefinition? Workflow = null, Guid? SourceDiscussionId = null, Guid? SourceDraftId = null,
+    int AutoReviewAttempt = 0, string? ExecutionBaseCommit = null)
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? ReadOnlyInstruction { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string ArtifactStage { get; init; } = "Planning";
     public static WorkTask Create(Guid projectId, string title, string description, string criteria)
     {
         if (projectId == Guid.Empty) throw new ArgumentException("Project ID is required.");
@@ -75,7 +82,7 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
 public sealed record TaskEvent(long Sequence, Guid TaskId, string Kind, string Message, DateTimeOffset CreatedAt);
 public sealed record TaskRun(Guid Id, Guid TaskId, string Status, string? WorktreePath, string? BaseCommit,
     string? ResultCommit, string? Error, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, RunKind Kind = RunKind.Implementation,
-    AiSelection? Selection = null);
+    AiSelection? Selection = null, AiAcceptanceReport[]? AiReviews = null);
 public sealed record PlanRevision(Guid Id, Guid TaskId, Guid? RunId, int Revision, string Text, string Source, DateTimeOffset CreatedAt, string? BaseCommit = null);
 public sealed record TaskClaim(WorkTask Task, TaskRun Run);
 public sealed record TaskReview(Guid Id, Guid TaskId, Guid RunId, string ResultCommit, ReviewDecision Decision,

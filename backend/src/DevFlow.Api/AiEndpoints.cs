@@ -1,13 +1,16 @@
 using DevFlow.Core;
 using DevFlow.Contracts;
 using DevFlow.Runners;
+
+
 namespace DevFlow.Api;
 public sealed record LoginRequest(string Mode = "browser");
+public sealed record BrowseFoldersRequest(string? Path = null);
 public static class AiEndpoints
 {
     public static void MapAiEndpoints(this WebApplication app)
     {
-        app.MapGet("/api/ai/providers", (CliRegistry registry) => registry.List());
+        app.MapGet("/api/ai/providers", async (CliDiagnostics diagnostics, bool? refresh, CancellationToken ct) => await diagnostics.ListProvidersAsync(ct, refresh == true));
         app.MapGet("/api/ai/{provider}/diagnostics", (string provider, CliDiagnostics diagnostics, CancellationToken ct) => diagnostics.InspectAsync(provider, ct));
         app.MapPost("/api/ai/{provider}/probe", async (string provider, AiSelection input, HttpContext context, CliDiagnostics diagnostics, CancellationToken ct) =>
         {
@@ -27,6 +30,16 @@ public static class AiEndpoints
         { ExplicitAction(context); return Results.Ok(logins.Cancel(id)); });
         app.MapPut("/api/projects/{id:guid}/ai-defaults", (Guid id, SetProjectAiRequest input, ITaskStore store, CancellationToken ct) =>
             store.SetProjectAiAsync(id, input.AiDefaults, input.ExpectedVersion, ct));
+        app.MapPost("/api/projects/folders", (BrowseFoldersRequest input, HttpContext context) =>
+        {
+            ExplicitAction(context);
+            return Results.Ok(DevFlow.Infrastructure.LocalFolderBrowser.Browse(input.Path));
+        });
+        app.MapPost("/api/projects/pick-folder", async (BrowseFoldersRequest input, HttpContext context, DevFlow.Infrastructure.IFolderPicker picker, CancellationToken ct) =>
+        {
+            ExplicitAction(context);
+            return Results.Ok(new { path = await picker.PickAsync(input.Path, ct) });
+        });
         var ui = Path.Combine(AppContext.BaseDirectory, "ui");
         var assets = Path.Combine(ui, "assets");
         if (Directory.Exists(assets)) app.UseStaticFiles(new StaticFileOptions
@@ -38,7 +51,7 @@ public static class AiEndpoints
             ? Results.File(Path.Combine(ui, "index.html"), "text/html; charset=utf-8")
             : Results.Problem("Build frontend with npm run build before building or publishing the API.", statusCode: 503));
     }
-    private static void ExplicitAction(HttpContext context)
+    internal static void ExplicitAction(HttpContext context)
     {
         if (context.Request.Headers["X-DevFlow-Action"] != "1") throw new ArgumentException("Explicit local action header is required.");
         if (context.Request.Host.Host.ToLowerInvariant() is not ("localhost" or "127.0.0.1" or "::1" or "[::1]"))

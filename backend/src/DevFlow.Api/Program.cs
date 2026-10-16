@@ -9,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls(builder.Configuration["DevFlow:ApiUrl"] ?? "http://127.0.0.1:5180");
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
+builder.Services.AddSingleton<IFolderPicker, WindowsFolderPicker>();
 builder.Services.AddSingleton(new CliRegistry(builder.Configuration["DevFlow:CodexExecutable"], builder.Configuration["DevFlow:GeminiExecutable"],
     builder.Configuration["DevFlow:NodeExecutable"],
     builder.Configuration.GetSection("DevFlow:Models:Codex").GetChildren().Select(c => c.Value!).ToArray(),
@@ -24,10 +25,18 @@ builder.Services.AddSingleton<IGitMergeService, GitMergeService>();
 builder.Services.AddSingleton<MergeCoordinator>();
 builder.Services.AddSingleton<IRunArtifactReader>(_ => new RunArtifactReader(builder.Configuration["DevFlow:ArtifactsRoot"] ??
     Path.Combine(Environment.CurrentDirectory, ".data", "artifacts")));
-builder.Services.AddSingleton<ITaskStore>(_ => new SqliteTaskStore(
+builder.Services.AddSingleton(_ => new SqliteTaskStore(
     builder.Configuration["DevFlow:DatabasePath"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "devflow.db")));
+builder.Services.AddSingleton<ITaskStore>(sp => sp.GetRequiredService<SqliteTaskStore>());
+var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
+builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts));
+var collaborationWorktrees = Path.GetFullPath(builder.Configuration["DevFlow:WorktreeRoot"] ?? Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "DevFlow.Worktrees"));
+builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(sp.GetRequiredService<IProcessRunner>(),
+    collaborationWorktrees));
+builder.Services.AddSingleton(sp => new StorageManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts, collaborationWorktrees));
 var app = builder.Build();
 await app.Services.GetRequiredService<ITaskStore>().InitializeAsync();
+await app.Services.GetRequiredService<SqliteTaskStore>().RecoverDiscussionsAsync();
 app.Use(async (context, next) =>
 {
     try { await next(context); }
@@ -54,13 +63,27 @@ app.MapPost("/api/projects", async (CreateProjectRequest input, ITaskStore store
 app.MapGet("/api/projects/{id:guid}", async (Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetProjectAsync(id, ct) is { } p ? Results.Ok(p) : Results.NotFound());
 app.MapGet("/api/tasks", (ITaskStore store, CancellationToken ct) => store.ListTasksAsync(ct));
-app.MapPost("/api/tasks", async (CreateTaskRequest input, ITaskStore store, CancellationToken ct) =>
+app.MapPost("/api/tasks", async (CreateTaskRequest input, SqliteTaskStore store, CancellationToken ct) =>
 {
     var project = await store.GetProjectAsync(input.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
+    var rules = await store.ResolveRulesAsync(input.RuleIds ?? project.DefaultRuleIds ?? [], ct);
+    var flow = WorkflowDefinition.Normalize(input.Workflow);
+    if (input.SourceDiscussionId.HasValue != input.SourceDraftId.HasValue) throw new ArgumentException("Discussion and draft IDs must be supplied together.");
+    if (input.SourceDiscussionId is { } discussionId)
+    {
+        var discussion = await store.GetDiscussionAsync(discussionId, ct) ?? throw new MissingEntityException("Discussion not found.");
+        var draft = discussion.Drafts.SingleOrDefault(d => d.Id == input.SourceDraftId) ?? throw new MissingEntityException("Draft not found.");
+        if (draft.OpenQuestions is { Length: > 0 } && !input.AcknowledgeOpenQuestions) throw new ArgumentException("Review the open questions and explicitly acknowledge their handling before creating a task.");
+    }
     var task = WorkTask.Create(input.ProjectId, input.Title, input.Description, input.AcceptanceCriteria) with
-    { Ai = AiConfiguration.Resolve(project.AiDefaults, input.Planning, input.Implementation) };
-    if (input.AutoPlan) task = task.RequestPlanning();
-    await store.AddTaskAsync(task, ct);
+    { Ai = AiConfiguration.Resolve(project.AiDefaults, input.Planning, input.Implementation), Rules = rules,
+      TaskRules = string.IsNullOrWhiteSpace(input.TaskRules) ? null : WorkTask.Required(input.TaskRules, 12000),
+      Policy = ExecutionPolicy.Normalize(input.Policy, rules), Workflow = flow,
+      SourceDiscussionId = input.SourceDiscussionId, SourceDraftId = input.SourceDraftId };
+    if (!flow.PlanningEnabled) task = task.SetPlan("依照已確認的需求與驗收條件直接實作；遵守本次規則及允許編輯範圍。");
+    if (input.AutoPlan) task = flow.PlanningEnabled ? task.RequestPlanning() : task.ApprovePlan();
+    if (task.SourceDiscussionId.HasValue) task = await store.AddDiscussionTaskAsync(task, ct);
+    else await store.AddTaskAsync(task, ct);
     return Results.Created($"/api/tasks/{task.Id}", task);
 });
 app.MapGet("/api/tasks/{id:guid}", async (Guid id, ITaskStore store, CancellationToken ct) => Results.Ok(await Find(id, store, ct)));
@@ -101,6 +124,8 @@ app.MapReviewEndpoints();
 app.MapMergeEndpoints();
 app.MapPlanningArtifactEndpoints();
 app.MapAiEndpoints();
+app.MapCollaborationEndpoints();
+app.MapStorageEndpoints();
 app.Run();
 static async Task<WorkTask> Find(Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetTaskAsync(id, ct) ?? throw new MissingEntityException("Task not found.");

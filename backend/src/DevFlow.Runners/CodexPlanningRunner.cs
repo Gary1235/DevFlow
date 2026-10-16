@@ -7,30 +7,32 @@ public sealed class CodexPlanningRunner(IProcessRunner process, string executabl
     {
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);
-        var schema = Path.Combine(directory, "Planning-schema.json");
-        var final = Path.Combine(directory, "Planning-result.json");
+        var prefix = task.ArtifactStage;
+        var schema = Path.Combine(directory, prefix + "-schema.json");
+        var final = Path.Combine(directory, prefix + "-result.json");
         await File.WriteAllTextAsync(schema, """
             {"type":"object","properties":{"plan":{"type":"string"}},"required":["plan"],"additionalProperties":false}
             """, ct);
         var prompt = $"""
-            Analyze this repository and produce an implementation plan for human approval.
+            {task.ReadOnlyInstruction ?? "Analyze this repository and produce an implementation plan for human approval. Describe contracts, affected files, meaningful tests, steps, validation, risks and unresolved questions."}
             Read repository instructions and source files. Do not edit files, commit, merge, push, or implement the task.
-            Describe API contracts, data changes, affected files, meaningful failing tests, implementation steps,
-            validation commands, risks, assumptions and unresolved questions. Use the requested JSON schema.
+            Use the requested JSON schema; put your complete response in the plan string.
+            {TaskInstructions.For(task, task.ReadOnlyInstruction is null ? "Planning" : "Discussion")}
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
             Previous plan: {task.Plan?.Text}
             """;
-        await File.WriteAllTextAsync(Path.Combine(directory, "Planning-prompt.txt"), prompt, ct);
+        await File.WriteAllTextAsync(Path.Combine(directory, prefix + "-prompt.txt"), prompt, ct);
         var selection = AiSelection.Normalize(task.Ai?.Planning);
-        await File.WriteAllTextAsync(Path.Combine(directory, "Planning-selection.json"), JsonSerializer.Serialize(selection), ct);
+        await File.WriteAllTextAsync(Path.Combine(directory, prefix + "-selection.json"), JsonSerializer.Serialize(selection), ct);
         List<string> arguments = ["exec", "--sandbox", "read-only", "--json", "--ephemeral"];
         if (selection.Model != null) arguments.AddRange(["--model", selection.Model]);
+        CliReasoning.AddArguments(arguments, selection);
         arguments.AddRange(["--output-schema", schema, "--output-last-message", final, "-C", workspace.Path, "-"]);
         var result = await process.RunAsync(executable, arguments, workspace.Path, prompt, ct);
-        await File.WriteAllTextAsync(Path.Combine(directory, "Planning-agent.jsonl"), result.StandardOutput, ct);
-        await File.WriteAllTextAsync(Path.Combine(directory, "Planning-agent.stderr.log"), result.StandardError, ct);
+        await File.WriteAllTextAsync(Path.Combine(directory, prefix + "-agent.jsonl"), result.StandardOutput, ct);
+        await File.WriteAllTextAsync(Path.Combine(directory, prefix + "-agent.stderr.log"), result.StandardError, ct);
         if (result.ExitCode != 0 || !File.Exists(final) || new FileInfo(final).Length > 1024 * 1024)
             throw new InvalidOperationException("Planning CLI failed or did not produce a bounded final result; see run artifacts.");
         try

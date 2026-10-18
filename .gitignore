@@ -54,3 +54,7 @@ dist/
 .next/
 .nuxt/
 *.tsbuildinfo
+
+# Electron publish payload and installers
+desktop/payload/
+desktop/release/

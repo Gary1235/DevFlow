@@ -9,10 +9,12 @@ public sealed class CliRegistry
 {
     private readonly Dictionary<string, CliCommand?> commands;
     private readonly Dictionary<string, string[]> models;
+    private readonly string? configuredCodex, configuredGemini, configuredClaude, nodeExecutable;
     public CliRegistry(string? codex = null, string? gemini = null, string? node = null,
         string[]? codexModels = null, string[]? geminiModels = null, string? claude = null, string[]? claudeModels = null)
     {
         node ??= FindOnPath("node");
+        configuredCodex = codex; configuredGemini = gemini; configuredClaude = claude; nodeExecutable = node;
         commands = new(StringComparer.OrdinalIgnoreCase)
         {
             ["codex"] = Resolve(codex ?? FindCodex(), node),
@@ -26,8 +28,20 @@ public sealed class CliRegistry
             ["claude"] = ValidateModels(claudeModels ?? ["sonnet", "opus", "haiku"])
         };
     }
-    public IReadOnlyList<CliProvider> List() => commands.Select(p => new CliProvider(p.Key,
-        p.Value != null, p.Value?.Executable, models[p.Key], ModelDetails: models[p.Key].Select(m => new CliModelOption(m, m, KnownEfforts(p.Key, m))).ToArray())).ToArray();
+    public void Refresh()
+    {
+        lock (commands)
+        {
+            commands["codex"] = Resolve(configuredCodex ?? FindCodex(), nodeExecutable);
+            commands["gemini"] = Resolve(configuredGemini ?? FindGemini(), nodeExecutable);
+            commands["claude"] = Resolve(configuredClaude ?? FindClaude(), nodeExecutable);
+        }
+    }
+    public IReadOnlyList<CliProvider> List()
+    {
+        lock (commands) return commands.Select(p => new CliProvider(p.Key,
+            p.Value != null, p.Value?.Executable, models[p.Key], ModelDetails: models[p.Key].Select(m => new CliModelOption(m, m, KnownEfforts(p.Key, m))).ToArray())).ToArray();
+    }
     private static string[] KnownEfforts(string provider, string model)
     {
         if (provider != "claude") return [];
@@ -40,7 +54,7 @@ public sealed class CliRegistry
     public CliCommand Require(string provider)
     {
         provider = AiSelection.Normalize(new(provider)).Provider;
-        return commands[provider] ?? throw new ConflictException($"{provider} CLI is not installed or configured. Configure its native executable or JavaScript entry point.");
+        lock (commands) return commands[provider] ?? throw new ConflictException($"{provider} CLI is not installed or configured. Configure its native executable or JavaScript entry point.");
     }
     private static string[] ValidateModels(string[] values) => values.Select(v => AiSelection.Normalize(new("codex", v)).Model!)
         .Where(v => v != null).Distinct(StringComparer.Ordinal).ToArray();

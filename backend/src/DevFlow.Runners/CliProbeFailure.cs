@@ -32,7 +32,7 @@ internal static class CliProbeFailure
         if (Has("rate_limit_exceeded", "rate limit", "too many requests"))
             return ("RateLimited", "CLI 回報請求頻率限制。請稍後再試。");
         if (Has("model_not_found", "model not found", "does not exist or you do not have access", "not supported when using", "do not have access to", "not available for your account", "not allowed to use"))
-            return ("ModelUnavailable", "所選模型無法使用或帳號沒有權限。請更換模型，並確認目前登入帳號的模型使用資格。");
+            return ("ModelUnavailable", "CLI 回報所選模型目前不可用。請先檢查 CLI 更新並重新載入模型；更新後仍失敗，再確認登入帳號與模型使用資格。");
         if (Has("not logged in", "authentication required", "authentication failed", "invalid_api_key", "invalid api key", "token has expired", "token expired", "unauthorized", "401 Unauthorized"))
             return ("AuthenticationFailed", "CLI 回報驗證失敗或憑證失效。請透過官方 CLI 重新登入，再重新檢查狀態。");
         if (Has("sandbox initialization failed", "failed to setup sandbox", "failed to initialize sandbox", "sandbox is not supported", "no sandbox backend", "docker is not running", "docker not found"))

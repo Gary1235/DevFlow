@@ -40,6 +40,20 @@ public sealed class ReasoningTests : IAsyncLifetime
         Assert.Equal(new[] { "high", "xhigh", "max" }, models[1].ReasoningEfforts);
     }
 
+    [Fact] public void Catalog_retains_configured_hidden_model_with_its_real_efforts_only()
+    {
+        using var json = JsonDocument.Parse("""
+            {"data":[
+              {"model":"gpt-6.1-sol","hidden":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"},{"reasoningEffort":"ultra"}]},
+              {"model":"unrelated-hidden","hidden":true}]}
+            """);
+        var model = Assert.Single(CodexModelCatalog.Read(json.RootElement, "gpt-6.1-sol"));
+        Assert.Equal("gpt-6.1-sol", model.Id);
+        Assert.Equal(new[] { "low", "medium", "high", "xhigh", "ultra" }, model.ReasoningEfforts);
+        Assert.Equal("medium", model.DefaultReasoningEffort);
+        Assert.Empty(CodexModelCatalog.Read(json.RootElement));
+    }
+
     [Theory]
     [InlineData("codex", "high\";evil")]
     [InlineData("codex", "unknown")]

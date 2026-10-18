@@ -1,5 +1,32 @@
 # DevFlow v0.7
 
+## CLI 版本檢查與更新
+
+AI 連線頁提供 Codex／Gemini／Claude 的明確版本檢查與手動確認更新。
+只管理可驗證為本機 npm 全域安裝的 CLI，套件名稱固定為 `@openai/codex`、`@google/gemini-cli`、
+`@anthropic-ai/claude-code`。其他安裝來源顯示原安裝方式更新提示。
+Node 與 npm JS 入口以原生程序及 ArgumentList 執行，不使用 shell 拼接命令。
+檢查會查詢官方 npm registry，更新會安裝檢查結果中的精確版本、固定原安裝 prefix，
+再檢查 DevFlow 實際使用的 CLI 版本；不憑 npm exit code 直接宣告成功。
+
+接口：
+
+- `POST /api/ai/{provider}/cli/check`：目前／最新版本、實際執行檔、可否管理、10 分鐘有效的 check ID。
+- `POST /api/ai/{provider}/cli/update`：`{ "checkId": "..." }`，確認安裝與版本未改變後回傳 202 及作業 ID。
+- `GET /api/ai/cli/updates/{id}`：Updating／Verifying／Completed／Failed／TimedOut。
+
+兩個 POST 都要求 `X-DevFlow-Action: 1`、loopback 與同源來源檢查。安裝最多十分鐘，
+不自動重試、不自動執行付費模型測試，不回傳 npm 原始輸出。
+作業 metadata 在 API 記憶體中；API 重啟後舊作業回傳 404，需重新檢查實際版本。
+非正常中斷仍需人工確認外部 npm／CLI 程序狀態，不會自動重送安裝。
+
+API 與 Worker 透過 `DevFlow:CliControlRoot/cli-maintenance.lock` 共享執行／更新互斥。
+執行中的任務、討論、登入或 probe 會阻擋更新；更新期間 Worker 在領取任務前等待，排隊任務保留。
+更新結束後重新辨識 CLI。兩個程序必須使用同一控制目錄（預設 backend/.data/cli-control），
+且首次部署此功能時須一併重啟 API 與 Worker。此鎖不控制 DevFlow 之外的 CLI 程序，請先關閉外部 CLI 終端。
+預設辨識 Windows 使用者 npm 安裝；自訂部署可用 `DevFlow:NodeExecutable`、`DevFlow:NpmCliPath`、
+`DevFlow:NpmGlobalRoot` 設定絕對路徑，NpmGlobalRoot 應指向實際的 node_modules。
+
 以 .NET 10 建立的本機開發調度後端，附開發工作台。AI 調用全部透過本機 CLI。
 
 ## v0.7：React 前端工作台

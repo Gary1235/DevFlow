@@ -7,6 +7,44 @@ import {selectionText} from '../src/domain';
 import type {Provider,Selection} from '../src/types';
 
 const provider:Provider={id:'codex',installed:true,executable:'codex',models:['a','b'],modelsVerified:false,modelDetails:[{id:'a',displayName:'Model A',reasoningEfforts:['low','high'],defaultReasoningEffort:'high',isDefault:true},{id:'b',displayName:'Model B',reasoningEfforts:['medium'],defaultReasoningEffort:'medium',isDefault:false}]};
+it('labels the five CLI efforts distinctly and submits their exact values',()=>{
+  const data:Provider={...provider,models:['gpt-6.1-sol'],modelDetails:[{id:'gpt-6.1-sol',displayName:'GPT-6.1 Sol',defaultReasoningEffort:'medium',isDefault:true,reasoningEfforts:['none','low','medium','high','xhigh','max','ultra']}]};
+  render(<Choice data={data} initial={{provider:'codex',model:'gpt-6.1-sol'}}/>);
+  const effort=screen.getByLabelText('規劃推理程度');
+  expect(within(effort).getAllByRole('option').map(o=>o.textContent)).toEqual(['CLI 預設','低（low）','中（medium）','高（high）','極高（xhigh）','Ultra（ultra）']);
+  for(const value of ['low','medium','high','xhigh','ultra']){
+    fireEvent.change(effort,{target:{value}});
+    expect(JSON.parse(screen.getByTestId('selection').textContent!).reasoningEffort).toBe(value);
+  }
+});
+it('includes the configured CLI model in task choices even when missing from the catalog',()=>{
+  render(<Choice data={{...provider,configuredDefaultModel:'gpt-6.1-sol'}} initial={{provider:'codex',model:'gpt-6.1-sol'}}/>);
+  const models=screen.getByLabelText('規劃模型') as HTMLSelectElement;
+  expect(within(models).getByRole('option',{name:/gpt-6.1-sol/})).toBeTruthy();
+  expect(models.value).toBe('gpt-6.1-sol');
+  const effort=screen.getByLabelText('規劃推理程度') as HTMLSelectElement;
+  expect(effort.disabled).toBe(false);
+  expect(within(effort).getAllByRole('option').map(o=>(o as HTMLOptionElement).value)).toEqual(['','low','medium','high','xhigh','ultra']);
+  expect(screen.getByText(/手動指定，支援狀態待 CLI 驗證/)).toBeTruthy();
+});
+it('can explicitly probe the configured model missing from the CLI catalog',async()=>{
+  const requests:{path:string;body:any}[]=[];
+  vi.stubGlobal('fetch',async(path:string,options:RequestInit)=>{requests.push({path,body:options.body?JSON.parse(String(options.body)):null});return new Response(JSON.stringify({loginState:'LoggedIn',executionState:'Ready',message:'已登入'}));});
+  render(<NoticeProvider><AiConnections providers={[{...provider,configuredDefaultModel:'gpt-6.1-sol'}]}/></NoticeProvider>);
+  const models=screen.getByLabelText('Codex CLI測試模型');
+  expect(within(models).getByRole('option',{name:/gpt-6.1-sol/})).toBeTruthy();
+  expect(screen.getByText(/此預設模型尚未出現在 CLI 模型目錄/)).toBeTruthy();
+  fireEvent.change(models,{target:{value:'gpt-6.1-sol'}});
+  fireEvent.change(screen.getByLabelText('Codex CLI測試推理程度'),{target:{value:'ultra'}});
+  fireEvent.click(screen.getByRole('button',{name:'連線測試 · 使用額度'}));
+  await screen.findByText(/可執行/,{selector:'div.provider-status'});
+  expect(requests.find(r=>r.path.endsWith('/probe'))?.body).toMatchObject({provider:'codex',model:'gpt-6.1-sol',reasoningEffort:'ultra'});
+});
+it('does not duplicate a configured model already in the catalog',()=>{
+  render(<Choice data={{...provider,configuredDefaultModel:'a'}}/>);
+  const models=screen.getByLabelText('規劃模型');
+  expect(within(models).getAllByRole('option').filter(o=>(o as HTMLOptionElement).value==='a')).toHaveLength(1);
+});
 function Choice({data=provider,initial={provider:'codex',model:'a'} as Selection}:{data?:Provider;initial?:Selection}){
   const [value,setValue]=useState<Selection|null>(initial);
   return <><AiChoice providers={[data]} label="規劃" value={value} onChange={setValue}/><output data-testid="selection">{JSON.stringify(value)}</output></>;
@@ -45,3 +83,5 @@ it('sends the selected effort only when the user starts a model probe',async()=>
   await screen.findByText(/可執行/,{selector:'div.provider-status'});
   expect(requests.find(r=>r.path.endsWith('probe'))?.body).toEqual({provider:'codex',model:'a',reasoningEffort:'high'});
 });
+
+

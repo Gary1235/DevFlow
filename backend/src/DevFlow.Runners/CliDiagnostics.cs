@@ -69,13 +69,13 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
                 for (var page = 0; page < 10; page++)
                 {
                     var id = page + 1;
-                    var requestParams = new Dictionary<string, object?> { ["limit"] = 100, ["includeHidden"] = false };
+                    var requestParams = new Dictionary<string, object?> { ["limit"] = 100, ["includeHidden"] = true };
                     if (cursor is not null) requestParams["cursor"] = cursor;
                     var request = System.Text.Json.JsonSerializer.Serialize(new { method = "model/list", id, @params = requestParams });
                     await child.StandardInput.WriteLineAsync(request.AsMemory(), timeout.Token);
                     await child.StandardInput.FlushAsync(timeout.Token);
                     using var result = await ReadRpcResultAsync(child, id, timeout.Token);
-                    models.AddRange(CodexModelCatalog.Read(result.RootElement));
+                    models.AddRange(CodexModelCatalog.Read(result.RootElement, configuredDefaultModel));
                     cursor = result.RootElement.TryGetProperty("nextCursor", out var next) && next.ValueKind == System.Text.Json.JsonValueKind.String ? next.GetString() : null;
                     if (string.IsNullOrEmpty(cursor)) break;
                 }

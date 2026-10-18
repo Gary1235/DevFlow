@@ -6,10 +6,20 @@ using DevFlow.Runners;
 namespace DevFlow.Api;
 public sealed record LoginRequest(string Mode = "browser");
 public sealed record BrowseFoldersRequest(string? Path = null);
+public sealed record CliUpdateRequest(Guid CheckId);
 public static class AiEndpoints
 {
     public static void MapAiEndpoints(this WebApplication app)
     {
+        app.MapPost("/api/ai/{provider}/cli/check", async (string provider, HttpContext context, CliMaintenance maintenance, CancellationToken ct) =>
+        { ExplicitAction(context); return Results.Ok(await maintenance.CheckAsync(provider, ct)); });
+        app.MapPost("/api/ai/{provider}/cli/update", async (string provider, CliUpdateRequest input, HttpContext context, CliMaintenance maintenance, CancellationToken ct) =>
+        {
+            ExplicitAction(context);
+            var session = await maintenance.StartAsync(provider, input.CheckId, ct);
+            return Results.Accepted($"/api/ai/cli/updates/{session.Id}", session);
+        });
+        app.MapGet("/api/ai/cli/updates/{id:guid}", (Guid id, CliMaintenance maintenance) => maintenance.Get(id));
         app.MapGet("/api/ai/providers", async (CliDiagnostics diagnostics, bool? refresh, CancellationToken ct) => await diagnostics.ListProvidersAsync(ct, refresh == true));
         app.MapGet("/api/ai/{provider}/diagnostics", (string provider, CliDiagnostics diagnostics, CancellationToken ct) => diagnostics.InspectAsync(provider, ct));
         app.MapPost("/api/ai/{provider}/probe", async (string provider, AiSelection input, HttpContext context, CliDiagnostics diagnostics, CancellationToken ct) =>

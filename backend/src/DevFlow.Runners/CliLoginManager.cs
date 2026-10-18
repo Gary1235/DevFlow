@@ -81,6 +81,7 @@ public sealed class CliLoginManager(CliRegistry registry, ILoginTerminalLauncher
         }
     }
     public CliLoginSession Get(Guid id) { lock (gate) { Refresh(); return Find(id).Session; } }
+    public bool HasActiveLogins { get { lock (gate) { Refresh(); return sessions.Values.Any(e => e.Terminal is not null); } } }
     public CliLoginSession Cancel(Guid id)
     {
         lock (gate)

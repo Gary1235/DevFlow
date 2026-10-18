@@ -6,6 +6,8 @@ using DevFlow.Api;
 using DevFlow.Runners;
 
 var builder = WebApplication.CreateBuilder(args);
+if (builder.Configuration.GetValue<bool>("DevFlow:DesktopManaged"))
+    builder.Services.AddHostedService<DevFlow.Desktop.DesktopLifetime>();
 builder.WebHost.UseUrls(builder.Configuration["DevFlow:ApiUrl"] ?? "http://127.0.0.1:5180");
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
@@ -17,6 +19,7 @@ builder.Services.AddSingleton(new CliRegistry(builder.Configuration["DevFlow:Cod
     builder.Configuration["DevFlow:ClaudeExecutable"],
     builder.Configuration.GetSection("DevFlow:Models:Claude").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Claude").GetChildren().Select(c => c.Value!).ToArray() : null));
 var cliControl = Path.GetFullPath(builder.Configuration["DevFlow:CliControlRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "cli-control"));
+builder.Services.AddSingleton(new CliMaintenanceGate(cliControl));
 builder.Services.AddSingleton(sp => new CliDiagnostics(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), cliControl));
 builder.Services.AddSingleton<ILoginTerminalLauncher, WindowsLoginTerminalLauncher>();
 builder.Services.AddSingleton(sp => new CliLoginManager(sp.GetRequiredService<CliRegistry>(), sp.GetRequiredService<ILoginTerminalLauncher>(), cliControl));
@@ -28,6 +31,14 @@ builder.Services.AddSingleton<IRunArtifactReader>(_ => new RunArtifactReader(bui
 builder.Services.AddSingleton(_ => new SqliteTaskStore(
     builder.Configuration["DevFlow:DatabasePath"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "devflow.db")));
 builder.Services.AddSingleton<ITaskStore>(sp => sp.GetRequiredService<SqliteTaskStore>());
+builder.Services.AddSingleton(sp => new CliMaintenance(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(),
+    sp.GetRequiredService<CliMaintenanceGate>(), async ct =>
+    {
+        var store = sp.GetRequiredService<SqliteTaskStore>();
+        return sp.GetRequiredService<CliLoginManager>().HasActiveLogins ||
+            (await store.ListTasksAsync(ct)).Any(t => t.Status is DevFlow.Core.TaskStatus.Running or DevFlow.Core.TaskStatus.Planning) ||
+            (await store.ListDiscussionsAsync(ct)).Any(d => d.ActiveOperation is not null);
+    }, cliControl, builder.Configuration["DevFlow:NodeExecutable"], builder.Configuration["DevFlow:NpmCliPath"], builder.Configuration["DevFlow:NpmGlobalRoot"]));
 var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
 builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts));
 var collaborationWorktrees = Path.GetFullPath(builder.Configuration["DevFlow:WorktreeRoot"] ?? Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "DevFlow.Worktrees"));
@@ -35,6 +46,20 @@ builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(s
     collaborationWorktrees));
 builder.Services.AddSingleton(sp => new StorageManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts, collaborationWorktrees));
 var app = builder.Build();
+// Desktop sessions have a fresh secret injected by Electron, never exposed to React.
+var desktopToken = builder.Configuration["DevFlow:DesktopToken"];
+if (!string.IsNullOrEmpty(desktopToken))
+    app.Use(async (context, next) =>
+    {
+        var supplied = context.Request.Headers["X-DevFlow-Desktop"].ToString();
+        if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(supplied), System.Text.Encoding.UTF8.GetBytes(desktopToken)))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+        await next(context);
+    });
 await app.Services.GetRequiredService<ITaskStore>().InitializeAsync();
 await app.Services.GetRequiredService<SqliteTaskStore>().RecoverDiscussionsAsync();
 app.Use(async (context, next) =>
@@ -47,6 +72,14 @@ app.Use(async (context, next) =>
     }
 });
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value ?? "";
+    var usesCli = path.StartsWith("/api/ai/", StringComparison.OrdinalIgnoreCase) && !path.Contains("/cli/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/api/discussions", StringComparison.OrdinalIgnoreCase) && context.Request.Method == "POST";
+    using var lease = usesCli ? app.Services.GetRequiredService<CliMaintenanceGate>().EnterExecution() : null;
+    await next(context);
+});
 app.MapGet("/api/projects", (ITaskStore store, CancellationToken ct) => store.ListProjectsAsync(ct));
 app.MapPost("/api/projects", async (CreateProjectRequest input, ITaskStore store, CancellationToken ct) =>
 {

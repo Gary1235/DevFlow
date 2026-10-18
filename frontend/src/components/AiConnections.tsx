@@ -1,9 +1,10 @@
 import {useCallback,useEffect,useState} from 'react';
 import {api,ApiError} from '../api';
 import {useAction,useResource} from '../hooks';
-import {providerNames} from '../domain';
+import {providerNames,selectableModels} from '../domain';
 import {Heading,ReasoningChoice,useNotice} from './ui';
 import type {Diagnostic,LoginSession,Provider} from '../types';
+import {CliMaintenance} from './CliMaintenance';
 const labels:Record<string,string>={LoggedIn:'已登入',LoggedOut:'未登入',Unknown:'無法確認登入狀態',Unchecked:'尚未測試',Ready:'可執行',Error:'執行失敗',TimedOut:'逾時',WaitingForUser:'等待完成登入',AwaitingVerification:'正在確認登入狀態',Failed:'失敗',Cancelled:'已取消',CleanupFailed:'終端清理失敗'};
 function Card({provider,onReloadModels}:{provider:Provider;onReloadModels:()=>Promise<void>}){
   const notice=useNotice(),action=useAction(notice),[model,setModel]=useState(''),[reasoningEffort,setReasoningEffort]=useState<string|null>(null),[customSelected,setCustomSelected]=useState(false),[mode,setMode]=useState('browser'),[message,setMessage]=useState(''),[operationMessage,setOperationMessage]=useState('');
@@ -20,7 +21,7 @@ function Card({provider,onReloadModels}:{provider:Provider;onReloadModels:()=>Pr
   const isLoggedOut=loginState==='LoggedOut';
   const statusLabel=session?'登入作業進行中':loginState==='Checking'?'正在檢查登入狀態…':loginState==='NotInstalled'?'未安裝':labels[loginState]||loginState;
   const statusClass=isLoggedIn?'success':isLoggedOut?'amber':'neutral';
-  const models=provider.models;
+  const models=selectableModels(provider);
   const customModel=customSelected||!!model&&!models.includes(model);
   const diagnosticMessage=diagnostic.error||diagnostic.data?.message||(!provider.installed?'找不到 CLI，安裝或設定路徑後請重啟 API 與 Worker。':'');
   return <article className="panel provider-card" data-provider={provider.id}>
@@ -30,6 +31,7 @@ function Card({provider,onReloadModels}:{provider:Provider;onReloadModels:()=>Pr
     <div className="provider-status" role="status">{operationMessage||message||diagnosticMessage||'登入狀態會自動檢查。'}</div>
     {provider.configuredDefaultModel&&<p className="footnote">目前 CLI 預設模型：<strong>{provider.configuredDefaultModel}</strong>。選擇其他模型只套用本次測試。</p>}
     {provider.modelCatalogMessage&&<p className="footnote" role="status">{provider.modelCatalogMessage}</p>}
+    {provider.configuredDefaultModel&&!provider.modelDetails?.some(m=>m.id===provider.configuredDefaultModel)&&<p className="footnote">此預設模型尚未出現在 CLI 模型目錄的能力資料中；設定名稱不代表目前帳號可使用。請透過連線測試確認。</p>}
     <label>測試模型<select aria-label={providerNames[provider.id]+'測試模型'} value={customModel?'__custom':model} onChange={e=>{if(e.target.value==='__custom')setCustomSelected(true);else{setCustomSelected(false);setModel(e.target.value);setReasoningEffort(null);}}} disabled={!provider.installed}><option value="">CLI 預設</option>{models.map(m=><option value={m} key={m}>{provider.modelDetails?.find(d=>d.id===m)?.displayName||m}</option>)}<option value="__custom">自訂模型 ID…</option></select></label>
     {customModel&&<label>自訂模型 ID<input maxLength={128} value={model} onChange={e=>{setModel(e.target.value);setReasoningEffort(null);}} disabled={!provider.installed} placeholder="輸入 CLI 支援的模型 ID"/></label>}
     <ReasoningChoice label={providerNames[provider.id]+'測試推理程度'} provider={provider} model={model||null} value={reasoningEffort} onChange={setReasoningEffort} disabled={!provider.installed}/>
@@ -42,6 +44,7 @@ function Card({provider,onReloadModels}:{provider:Provider;onReloadModels:()=>Pr
       {session&&<button className="danger-button" disabled={action.busy} onClick={()=>void action.run(async()=>{try{const s=await api<LoginSession>('/api/ai/logins/'+session+'/cancel','POST');setMessage(s.message);if(s.state!=='CleanupFailed')setSession(null);}catch(error){if(error instanceof ApiError&&error.status===404){setSession(null);setMessage('登入作業已不可查詢，可重新啟動登入。');}else throw error;}})}>取消登入</button>}
     </div>
     <p className="footnote">模型清單來自 CLI 目錄或已設定別名，不代表帳號權限已驗證；連線測試會使用額度。未知登入狀態仍可手動確認。</p>
+    <CliMaintenance provider={provider} loginActive={!!session||action.busy} onUpdated={async()=>{diagnostic.refresh();await onReloadModels();}}/>
   </article>;
 }
 export function AiConnections({providers}:{providers:Provider[]}){

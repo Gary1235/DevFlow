@@ -5,17 +5,19 @@ namespace DevFlow.Runners;
 
 public static class CodexModelCatalog
 {
-    public static CliModelOption[] Read(JsonElement result)
+    public static CliModelOption[] Read(JsonElement result, string? configuredModel = null)
     {
         if (!result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return [];
         var models = new List<CliModelOption>();
         foreach (var item in data.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Object || item.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True) continue;
+            if (item.ValueKind != JsonValueKind.Object) continue;
             string? Text(string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
             var id = Text("model") ?? Text("id");
             if (string.IsNullOrWhiteSpace(id)) continue;
             try { id = AiSelection.Normalize(new("codex", id)).Model!; } catch (ArgumentException) { continue; }
+            if (item.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True &&
+                !string.Equals(id, configuredModel, StringComparison.Ordinal)) continue;
             var efforts = new List<string>();
             if (item.TryGetProperty("supportedReasoningEfforts", out var options) && options.ValueKind == JsonValueKind.Array)
                 foreach (var option in options.EnumerateArray())

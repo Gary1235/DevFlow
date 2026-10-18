@@ -27,6 +27,28 @@ public sealed class AiApiTests : IAsyncLifetime
     }
     private Task<HttpResponseMessage> Create(Guid projectId, object? planning = null, object? implementation = null) =>
         client.PostAsJsonAsync("/api/tasks", new { projectId, title = "AI", description = "Build", acceptanceCriteria = "Tests", planning, implementation });
+    [Theory]
+    [InlineData("check")]
+    [InlineData("update")]
+    public async Task Cli_maintenance_requires_explicit_local_action(string operation)
+    {
+        var response = await client.PostAsJsonAsync($"/api/ai/codex/cli/{operation}", new { checkId = Guid.NewGuid() });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+    [Theory]
+    [InlineData("check")]
+    [InlineData("update")]
+    public async Task Cli_maintenance_rejects_foreign_origins_before_running_commands(string operation)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/ai/codex/cli/{operation}")
+        { Content = JsonContent.Create(new { checkId = Guid.NewGuid() }) };
+        request.Headers.Add("X-DevFlow-Action", "1"); request.Headers.Add("Origin", "https://foreign.example");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.SendAsync(request)).StatusCode);
+    }
+    [Fact] public async Task Unknown_update_session_is_not_restarted()
+    {
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/ai/cli/updates/{Guid.NewGuid()}")).StatusCode);
+    }
     [Fact] public async Task Legacy_submission_resolves_and_persists_codex_defaults()
     {
         var response = await Create(await Project());

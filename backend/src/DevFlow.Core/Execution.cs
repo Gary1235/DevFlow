@@ -13,17 +13,22 @@ public interface IWorkspaceManager
     Task<Workspace> CreateAsync(ProjectDefinition project, Guid runId, CancellationToken ct);
     Task<string> SnapshotAsync(Workspace workspace, CancellationToken ct);
     Task AssertUnchangedAsync(Workspace workspace, CancellationToken ct);
+    Task CleanupReadOnlyAsync(ProjectDefinition project, Workspace workspace, Guid runId, CancellationToken cancellationToken) => Task.CompletedTask;
 }
 public interface IValidationRunner
 {
     Task<ValidationEvidence> ValidateAsync(ProjectDefinition project, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct);
+}
+public interface IStepValidationRunner
+{
+    IValidationRunner ForStep(Guid stepId);
 }
 public interface IProcessRunner
 {
     Task<ProcessResult> RunAsync(string executable, IReadOnlyList<string> arguments, string workingDirectory,
         string? standardInput, CancellationToken ct);
 }
-public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, IWorkspaceManager workspaces, IValidationRunner validation,
+public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, IWorkspaceManager workspaces, IValidationRunner validation,
     IPlanningRunner? reviewer = null, IResultDiffReader? diffs = null, IExecutionPolicyGuard? guard = null)
 {
     public async Task<bool> ExecuteNextAsync(CancellationToken ct = default)
@@ -38,8 +43,10 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
         string? executionBase = claim.Task.ExecutionBaseCommit;
         try
         {
+            await using var activity = new TaskActivityReporter(store, claim.Run.Id);
+            await activity.StageAsync("準備實作工作目錄", ct);
             var project = await store.GetProjectAsync(claim.Task.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
-            var baseCommit = claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
+            var baseCommit = claim.Task.StepResults?.LastOrDefault()?.ResultCommit ?? claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
             var source = baseCommit is { } revision ? project with { BaseBranch = revision } : project;
             workspace = await workspaces.CreateAsync(source, claim.Run.Id, ct);
             executionBase ??= workspace.BaseCommit;
@@ -50,7 +57,13 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
                 if (current.Status == TaskStatus.Cancelled) throw new OperationCanceledException("Task cancelled.");
                 await store.SaveTaskAsync(current with { ExecutionBaseCommit = executionBase, Version = current.Version + 1 }, current.Version, ct);
             }
+            if (claim.Task.Workflow?.Steps is not null)
+            {
+                await ExecuteWorkflowAsync(claim, project, workspace, executionBase, activity, ct);
+                return true;
+            }
             await store.AppendEventAsync(claim.Task.Id, "PhaseStarted", TddPhase.Baseline.ToString(), ct);
+            await activity.StageAsync("執行基準測試", ct);
             var baseline = await validation.ValidateAsync(project, workspace, claim.Run.Id, TddPhase.Baseline, ct);
             List<string> validationSummary = [$"Baseline: exit {baseline.ExitCode}, total {baseline.Total}, failed {baseline.Failed}"];
             if (baseline.ExitCode != 0 || baseline.Failed != 0)
@@ -62,10 +75,12 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
             foreach (var phase in policy.Tdd ? new[] { TddPhase.Red, TddPhase.Green, TddPhase.Refactor } : [TddPhase.Implementation])
             {
                 ct.ThrowIfCancellationRequested();
-                if ((await store.GetTaskAsync(claim.Task.Id, ct))!.Status == TaskStatus.Cancelled)
+                if (await store.GetTaskStatusAsync(claim.Task.Id, ct) == TaskStatus.Cancelled)
                     throw new OperationCanceledException("Task cancelled.");
                 await store.AppendEventAsync(claim.Task.Id, "PhaseStarted", phase.ToString(), ct);
+                await activity.StageAsync("AI 實作 · " + phase, ct);
                 await agent.ExecuteAsync(claim.Task, workspace, claim.Run.Id, phase, ct);
+                await activity.StageAsync("檢查變更並執行測試 · " + phase, ct);
                 if (guard is not null) await guard.CheckAsync(workspace with { BaseCommit = executionBase }, policy, ct);
                 var evidence = await validation.ValidateAsync(project, workspace, claim.Run.Id, phase, ct);
                 validationSummary.Add($"{phase}: exit {evidence.ExitCode}, total {evidence.Total}, failed {evidence.Failed}; passed IDs: {string.Join(", ", evidence.PassedTests.Take(100))}; failed IDs: {string.Join(", ", evidence.FailedTests.Take(100))}");
@@ -82,8 +97,9 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
                 await store.AppendEventAsync(claim.Task.Id, "PhaseVerified", phase.ToString(), ct);
             }
             ct.ThrowIfCancellationRequested();
-            if ((await store.GetTaskAsync(claim.Task.Id, ct))!.Status == TaskStatus.Cancelled)
+            if (await store.GetTaskStatusAsync(claim.Task.Id, ct) == TaskStatus.Cancelled)
                 throw new OperationCanceledException("Task cancelled.");
+            await activity.StageAsync("保存實作成果", ct);
             resultCommit = await workspaces.SnapshotAsync(workspace, ct);
             var reviewers = claim.Task.Workflow?.Reviewers ?? [];
             if (reviewers.Length > 0)
@@ -95,6 +111,7 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
                 {
                     var selection = reviewers[index];
                     await store.AppendEventAsync(claim.Task.Id, "AiAcceptanceStarted", $"Stage {index + 1}: {selection.Provider}/{selection.Model ?? "CLI default"}", ct);
+                    await activity.StageAsync("AI 驗收 · " + (index + 1) + " · " + selection.Provider, ct);
                     var reviewId = Guid.NewGuid();
                     var reviewTask = claim.Task with
                     {
@@ -117,6 +134,8 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
         }
         catch (Exception ex)
         {
+            if (claim.Task.Workflow?.Steps is not null)
+                resultCommit = (await store.GetRunAsync(claim.Run.Id, CancellationToken.None))?.ResultCommit;
             await store.CompleteRunAsync(claim.Run.Id, false, workspace?.Path, executionBase ?? workspace?.BaseCommit,
                 resultCommit, ex is OperationCanceledException ? "Execution cancelled, interrupted, or timed out." : ex.Message, CancellationToken.None);
         }
@@ -130,9 +149,9 @@ public sealed class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, I
     private sealed record AcceptanceResult(string Verdict, string Summary);
     private async Task MonitorCancellationAsync(Guid taskId, CancellationTokenSource execution)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));
         while (await timer.WaitForNextTickAsync(execution.Token))
-            if ((await store.GetTaskAsync(taskId, execution.Token))!.Status == TaskStatus.Cancelled)
+            if (await store.GetTaskStatusAsync(taskId, execution.Token) == TaskStatus.Cancelled)
             { execution.Cancel(); return; }
     }
 }

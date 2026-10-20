@@ -13,13 +13,13 @@ public sealed class GeminiCliRunner(IProcessRunner process, string executable, s
             TddPhase.Implementation => "Implement the approved requirements and appropriate tests. Preserve existing tests and behavior.",
             _ => throw new ArgumentOutOfRangeException(nameof(phase))
         };
-        await Invoke(task, workspace, runId, phase.ToString(), false,
+        await Invoke(task, workspace, runId, (task.ArtifactStage.StartsWith("Step-") ? task.ArtifactStage + "-" : "") + phase, false,
             instruction + "\nApproved plan: " + task.Plan?.Text + "\nReview feedback: " + task.RevisionInstructions, ct);
     }
     public async Task<string> PlanAsync(WorkTask task, Workspace workspace, Guid runId, CancellationToken ct)
     {
         var plan = await Invoke(task, workspace, runId, task.ArtifactStage, true,
-            (task.ReadOnlyInstruction ?? "Analyze repository instructions and source. Return an implementation plan for human approval with affected files, contracts, meaningful failing tests, steps, validation commands, assumptions and unresolved questions.") + " Do not modify files. Previous plan: " + task.Plan?.Text, ct);
+            (task.ReadOnlyInstruction ?? "Analyze repository instructions and source. Return an implementation plan for human approval with affected files, contracts, meaningful failing tests, steps, validation commands, assumptions and unresolved questions." + PlanContent.CompletionInstruction) + " Do not modify files. Previous plan: " + task.Plan?.Text, ct);
         plan = WorkTask.Required(plan, 40000);
         await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage + "-result.json"), JsonSerializer.Serialize(new { plan }), ct);
         return plan;
@@ -46,7 +46,7 @@ public sealed class GeminiCliRunner(IProcessRunner process, string executable, s
         var result = await process.RunAsync(executable, arguments, workspace.Path, prompt, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.json"), result.StandardOutput, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.stderr.log"), result.StandardError, ct);
-        if (result.ExitCode != 0) throw new InvalidOperationException($"Gemini {phase} exited with code {result.ExitCode}; see run artifacts.");
+        if (result.ExitCode != 0) throw CliExecutionErrors.Failed("Gemini", phase, result);
         try
         {
             using var json = JsonDocument.Parse(result.StandardOutput);

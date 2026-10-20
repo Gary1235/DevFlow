@@ -1,13 +1,14 @@
 using DevFlow.Core;
 using System.Text.Json;
 namespace DevFlow.Infrastructure;
-public sealed class DotnetValidationRunner(IProcessRunner process, string artifactsRoot) : IValidationRunner
+public sealed class DotnetValidationRunner(IProcessRunner process, string artifactsRoot, string? scope = null) : IValidationRunner, IStepValidationRunner
 {
+    public IValidationRunner ForStep(Guid stepId) => new DotnetValidationRunner(process, artifactsRoot, "Step-" + stepId.ToString("N"));
     public async Task<ValidationEvidence> ValidateAsync(ProjectDefinition project, Workspace workspace, Guid runId,
         TddPhase phase, CancellationToken ct)
     {
         ValidateArguments(project.ValidationArguments);
-        var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), phase.ToString());
+        var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), scope ?? "", phase.ToString());
         Directory.CreateDirectory(directory);
         var args = project.ValidationArguments.Concat(new[] { "--logger", "trx", "--results-directory", directory }).ToArray();
         var result = await process.RunAsync("dotnet", args, workspace.Path, null, ct);

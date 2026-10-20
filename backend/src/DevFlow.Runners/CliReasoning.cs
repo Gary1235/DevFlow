@@ -9,6 +9,6 @@ internal static class CliReasoning
         selection = AiSelection.Normalize(selection);
         if (selection.ReasoningEffort is not { } effort) return;
         if (selection.Provider == "codex") arguments.AddRange(["--config", $"model_reasoning_effort=\"{effort}\""]);
-        else if (selection.Provider == "claude") arguments.AddRange(["--effort", effort]);
+        else if (selection.Provider is "claude" or "antigravity") arguments.AddRange(["--effort", effort]);
     }
 }

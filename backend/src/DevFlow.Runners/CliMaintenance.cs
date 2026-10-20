@@ -56,6 +56,23 @@ public sealed class CliMaintenance : IDisposable
 
     public async Task<CliVersionCheck> CheckAsync(string provider, CancellationToken ct = default)
     {
+        provider = AiSelection.Normalize(new(provider)).Provider;
+        if (provider == "antigravity")
+        {
+            using var agyLease = gate.EnterExecution();
+            registry.Refresh();
+            var agyCommand = registry.Require(provider);
+            Directory.CreateDirectory(directory);
+            using var agyTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            agyTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+            string? version = null;
+            try { version = await ReadVersion(agyCommand, agyTimeout.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { }
+            return new(Guid.NewGuid(), provider, agyCommand.Executable, version, null, false, false,
+                "DevFlow 目前僅讀取本機版本；請在終端執行 agy update，或使用官方安裝方式更新。",
+                "agy update", DateTimeOffset.UtcNow.AddMinutes(10));
+        }
         var package = Package(provider);
         using var lease = gate.EnterExecution();
         registry.Refresh();
@@ -96,6 +113,8 @@ public sealed class CliMaintenance : IDisposable
     public CliUpdateSession Get(Guid id) { lock (sync) return sessions.GetValueOrDefault(id) ?? throw new MissingEntityException("CLI update session not found; API may have restarted. Check the installed version before retrying."); }
     public async Task<CliUpdateSession> StartAsync(string provider, Guid checkId, CancellationToken ct = default)
     {
+        if (AiSelection.Normalize(new(provider)).Provider == "antigravity")
+            throw new ConflictException("請依 Antigravity CLI 官方安裝方式更新；不支援 npm 更新。");
         Package(provider);
         CliVersionCheck check;
         lock (sync) check = checks.GetValueOrDefault(checkId) ?? throw new ConflictException("請先檢查 CLI 更新。");

@@ -3,10 +3,11 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const { Services, taskNotifications, isSameOrigin } = require('./services.cjs');
+const { Updates, hasActiveWork } = require('./updates.cjs');
 
 app.setName('DevFlow');
 app.setAppUserModelId('dev.devflow.desktop');
-let window, tray, services, timer;
+let window, tray, services, timer, updates, updateTimer;
 let ready = false, quitting = false, confirming = false, failureShown = false;
 let previous;
 const smoke = process.argv.includes('--smoke-test');
@@ -44,23 +45,96 @@ async function quit() {
   if (result.response !== 1) { window?.hide(); return; }
   quitting = true;
   clearInterval(timer);
+  clearInterval(updateTimer);
   window?.hide();
   await stopServices();
   tray?.destroy();
   app.exit(0);
 }
+function notifyUpdate(title, body) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body, icon });
+  notification.on('click', show);
+  notification.show();
+}
+let recoveringUpdate = false;
+async function recoverUpdate(error) {
+  if (recoveringUpdate) return;
+  recoveringUpdate = true;
+  dialog.showErrorBox('無法安裝 DevFlow 更新', `${error.message}\n\nDevFlow 將重新啟動，稍後可再次檢查更新。`);
+  app.relaunch();
+  app.exit(1);
+}
+async function restartForUpdate() {
+  if (quitting || confirming || !ready) return;
+  await updates.install({
+    confirm: async () => {
+      confirming = true;
+      try {
+        const result = await dialog.showMessageBox({ type: 'question', title: '更新 DevFlow',
+          message: `重新啟動並安裝 DevFlow ${updates.version}？`,
+          detail: '請先完成 CLI 更新與登入作業。系統會再次檢查任務與討論，停止背景服務後安裝更新；排隊與歷史資料會保留。',
+          buttons: ['稍後', '重新啟動以更新'], defaultId: 0, cancelId: 0 });
+        if (result.response !== 1) return false;
+        const [tasks, discussions] = await Promise.all([
+          services.request('/api/tasks').then(response => response.json()),
+          services.request('/api/discussions').then(response => response.json())
+        ]);
+        if (hasActiveWork(tasks, discussions)) {
+          await dialog.showMessageBox({ type: 'info', title: '工作仍在執行',
+            message: '請等待任務與討論完成後，再選擇重新啟動以更新。' });
+          return false;
+        }
+        return true;
+      } finally { confirming = false; }
+    },
+    stop: async () => {
+      quitting = true;
+      clearInterval(timer);
+      clearInterval(updateTimer);
+      window?.hide();
+      await stopServices();
+    },
+    recover: async error => {
+      if (quitting) await recoverUpdate(error);
+      else dialog.showErrorBox('暫時無法更新', `${error.message}\n請稍後重試。`);
+    }
+  });
+}
+function updateMenuItem() {
+  return { label: updates.label, enabled: updates.actionable,
+    click: () => { void (updates.state === 'downloaded' ? restartForUpdate() : updates.check(true)); } };
+}
+function refreshMenus() {
+  if (!tray || !updates || quitting) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '開啟 DevFlow', click: show },
+    { label: '開啟資料目錄', click: () => { void shell.openPath(services.dataRoot); } },
+    { label: '開啟診斷紀錄', click: () => { void shell.openPath(path.join(services.dataRoot, 'logs')); } },
+    { type: 'separator' }, updateMenuItem(),
+    { type: 'separator' }, { label: '停止服務並結束', click: () => { void quit(); } }
+  ]));
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: 'DevFlow', submenu: [{ label: `版本 ${app.getVersion()}`, enabled: false }, updateMenuItem(),
+      { type: 'separator' }, { label: '隱藏至系統匣', click: () => window.hide() },
+      { label: '停止服務並結束', click: () => { void quit(); } }] },
+    { label: '編輯', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: '檢視', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }
+  ]));
+}
 async function fail(message) {
+  if (smoke) {
+    console.error(message);
+    quitting = true;
+    try { await services?.stop(); } catch (error) { console.error(error.message); }
+    app.exit(1);
+    return;
+  }
   if (failureShown || quitting) return;
   failureShown = true;
   ready = false;
   clearInterval(timer);
-  if (smoke) {
-    console.error(message);
-    quitting = true;
-    await services?.stop();
-    app.exit(1);
-    return;
-  }
+  clearInterval(updateTimer);
   dialog.showErrorBox('DevFlow 服務無法執行', `${message}\n\n診斷紀錄：${path.join(services.dataRoot, 'logs')}\n服務會停止，資料會保留；修正問題後重新開啟。`);
   quitting = true;
   await stopServices();
@@ -71,7 +145,7 @@ async function poll() {
   if (!ready || quitting) return;
   try {
     const tasks = await (await services.request('/api/tasks')).json();
-    const labels = { AwaitingApproval: '計畫等待核准', AwaitingReview: '成果等待審核', Failed: '任務執行失敗', PlanningFailed: '任務規劃失敗', Merged: '成果已合併' };
+    const labels = { AwaitingApproval: '計畫等待核准', AwaitingReview: '成果等待審核', AwaitingStepApproval: '流程步驟等待確認', Failed: '任務執行失敗', PlanningFailed: '任務規劃失敗', Merged: '成果已合併' };
     for (const task of taskNotifications(previous, tasks)) {
       if (!Notification.isSupported()) break;
       const notification = new Notification({ title: labels[task.status], body: task.title, icon });
@@ -131,19 +205,12 @@ else {
       window.on('page-title-updated', event => event.preventDefault());
       tray = new Tray(icon);
       tray.setToolTip('DevFlow — 背景任務持續執行');
-      tray.setContextMenu(Menu.buildFromTemplate([
-        { label: '開啟 DevFlow', click: show },
-        { label: '開啟資料目錄', click: () => { void shell.openPath(dataRoot); } },
-        { label: '開啟診斷紀錄', click: () => { void shell.openPath(path.join(dataRoot, 'logs')); } },
-        { type: 'separator' }, { label: '停止服務並結束', click: () => { void quit(); } }
-      ]));
+      updates = new Updates({ updater: require('electron-updater').autoUpdater,
+        enabled: app.isPackaged && !smoke, notify: notifyUpdate });
+      updates.on('changed', refreshMenus);
+      updates.on('update-error', error => { if (quitting && updates.installing) void recoverUpdate(error); });
+      refreshMenus();
       tray.on('double-click', show);
-      Menu.setApplicationMenu(Menu.buildFromTemplate([
-        { label: 'DevFlow', submenu: [{ label: '隱藏至系統匣', click: () => window.hide() },
-          { label: '停止服務並結束', click: () => { void quit(); } }] },
-        { label: '編輯', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-        { label: '檢視', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }
-      ]));
       await window.loadURL(services.origin);
       if (services.children.some(child => child.exited)) throw new Error('服務在載入期間結束。');
       ready = true;
@@ -175,13 +242,15 @@ else {
         await services.stop();
         if (services.children.some(child => !child.exited)) throw new Error('Child services survived shutdown.');
         tray.destroy();
-        fs.rmSync(dataRoot, { recursive: true, force: true });
+        fs.rmSync(dataRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
         console.log('PASS: React, API authentication, Worker readiness, close-to-tray, graceful shutdown. Screenshot: ' + target);
         app.exit(0);
         return;
       }
       await poll();
       timer = setInterval(() => { void poll(); }, 5000);
+      void updates.check();
+      if (updates.enabled) updateTimer = setInterval(() => { void updates.check(); }, 4 * 60 * 60 * 1000);
     } catch (error) { await fail(error.message); }
   }).catch(error => { dialog.showErrorBox('DevFlow 啟動失敗', error.message); app.exit(1); });
 }

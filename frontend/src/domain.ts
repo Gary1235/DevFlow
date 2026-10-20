@@ -16,10 +16,10 @@ export function selectableModels(provider?:Provider):string[]{
     return 0;
   });
 }
-export const providerNames:Record<string,string>={codex:'Codex CLI',gemini:'Gemini CLI',claude:'Claude Code'};
-export const statusNames:Record<string,string>={AwaitingPlan:'待規劃',AwaitingApproval:'待核准計畫',Queued:'實作排隊',Running:'實作與驗收中',AwaitingReview:'待成果審核',Failed:'實作失敗',Cancelled:'已取消',Approved:'成果已核准',Rejected:'已退回',Merging:'合併核對中',Merged:'已合併',PlanningQueued:'規劃排隊',Planning:'規劃中',PlanningFailed:'規劃失敗',AiChangesRequested:'AI 要求修正'};
-export const groups:Record<string,string[]>={active:['PlanningQueued','Planning','Queued','Running','Merging'],review:['AwaitingApproval','AwaitingReview','Approved'],failed:['Failed','PlanningFailed','Rejected'],done:['Merged','Cancelled']};
-export const editablePlan=['AwaitingPlan','AwaitingApproval','PlanningFailed'],cancellable=[...editablePlan,'PlanningQueued','Planning','Queued','Running'],phases=['Baseline','Red','Green','Refactor'];
+export const providerNames:Record<string,string>={codex:'Codex CLI',antigravity:'Antigravity CLI',gemini:'Gemini CLI（舊任務）',claude:'Claude Code'};
+export const statusNames:Record<string,string>={AwaitingStepApproval:'待確認步驟',AwaitingPlan:'待規劃',AwaitingApproval:'待核准計畫',Queued:'實作排隊',Running:'實作與驗收中',AwaitingReview:'待成果審核',Failed:'實作失敗',Cancelled:'已取消',Approved:'成果已核准',Rejected:'已退回',Merging:'合併核對中',Merged:'已合併',PlanningQueued:'規劃排隊',Planning:'規劃中',PlanningFailed:'規劃失敗',AiChangesRequested:'AI 要求修正'};
+export const groups:Record<string,string[]>={active:['PlanningQueued','Planning','Queued','Running','Merging'],review:['AwaitingStepApproval','AwaitingApproval','AwaitingReview','Approved'],failed:['Failed','PlanningFailed','Rejected'],done:['Merged','Cancelled']};
+export const editablePlan=['AwaitingPlan','AwaitingApproval','PlanningFailed'],cancellable=[...editablePlan,'AwaitingStepApproval','PlanningQueued','Planning','Queued','Running'],phases=['Baseline','Red','Green','Refactor'];
 export function tone(status:string){return groups.failed.includes(status)?'danger':groups.review.includes(status)?'amber':status==='Merged'?'success':groups.active.includes(status)?'blue':'neutral';}
 export const effortNames:Record<string,string>={none:'停用',minimal:'最少',low:'低',medium:'中',high:'高',xhigh:'極高',max:'最高',ultra:'Ultra'};
 export function selectionText(s:Selection|null|undefined){return `${providerNames[s?.provider||'codex']} · ${s?.model||'CLI 預設'}${s?.reasoningEffort?' · 推理 '+(effortNames[s.reasoningEffort]||s.reasoningEffort):''}`;}

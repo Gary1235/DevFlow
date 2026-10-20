@@ -64,14 +64,28 @@ public sealed partial class SqliteTaskStore
     public Task<IReadOnlyList<Discussion>> ListDiscussionsAsync(CancellationToken ct)
     { using var c = Open(ct); return Task.FromResult(ReadList<Discussion>(c, "SELECT Payload FROM Discussions ORDER BY rowid DESC")); }
 
-    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct)
+    public Task<Discussion> RenameDiscussionAsync(Guid id, int expectedVersion, string title, CancellationToken ct)
+    {
+        title = WorkTask.Required(title, 200);
+        using var c = Open(ct); using var tx = c.BeginTransaction();
+        var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
+        if (d.Version != expectedVersion) throw new ConflictException("Discussion changed; reload before renaming.");
+        var updated = d with { Title = title, AutoTitle = false, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
+        UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
+    }
+
+    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct, AiSelection? selection = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
         if (d.Version != expectedVersion || d.ActiveOperation is not null) throw new ConflictException("Discussion changed or an AI reply is still running. Refresh before retrying.");
         if (d.Messages.Sum(m => m.Content.Length) > 120000) throw new ArgumentException("This discussion is too long. Start a new discussion with a summary.");
         var messages = message is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "user", WorkTask.Required(message, 20000), DateTimeOffset.UtcNow)];
-        var updated = d with { Messages = messages, ActiveOperation = Guid.NewGuid(), Error = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
+        var title = d.AutoTitle && d.Messages.Length == 0 && message is not null
+            ? SummarizeDiscussionTitle(message)
+            : d.Title;
+        var operationId = Guid.NewGuid();
+        var updated = d with { Title = title, Selection = AiSelection.Normalize(selection ?? d.Selection), Messages = messages, ActiveOperation = operationId, LastOperationId = operationId, Error = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
     }
 
@@ -113,4 +127,12 @@ public sealed partial class SqliteTaskStore
 
     private static void UpdateDiscussion(Microsoft.Data.Sqlite.SqliteConnection c, Microsoft.Data.Sqlite.SqliteTransaction tx, Discussion d) =>
         Execute(c, tx, "UPDATE Discussions SET Payload=$payload WHERE Id=$id", ("$id", d.Id.ToString()), ("$payload", JsonSerializer.Serialize(d)));
+
+    private static string SummarizeDiscussionTitle(string message)
+    {
+        var firstLine = message.Trim().Split('\n')[0];
+        var text = System.Text.RegularExpressions.Regex.Replace(firstLine, @"\s+", " ").Trim();
+        var info = new System.Globalization.StringInfo(text);
+        return info.LengthInTextElements <= 36 ? text : info.SubstringByTextElements(0, 36) + "…";
+    }
 }

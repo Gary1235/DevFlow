@@ -31,14 +31,20 @@ public sealed partial class SqliteTaskStore
     }
     public Task<IReadOnlyList<TaskReview>> ListReviewsAsync(Guid taskId, CancellationToken ct = default)
     { using var c = Open(ct); return Task.FromResult(ReadList<TaskReview>(c, "SELECT Payload FROM Reviews WHERE TaskId=$id ORDER BY rowid", ("$id", taskId.ToString()))); }
-    public Task<WorkTask> RetryAsync(Guid taskId, string? instructions, int expectedVersion, CancellationToken ct = default)
+    public Task<WorkTask> RetryAsync(Guid taskId, string? instructions, int expectedVersion, CancellationToken ct = default, string scope = "Resume")
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var task = ReadOne<WorkTask>(c, tx, "Tasks", taskId) ?? throw new MissingEntityException("Task not found.");
         if (task.Version != expectedVersion) throw new ConflictException("Task changed; reload before retrying.");
+        var preview = RetryStrategy.Preview(task, scope);
         var updated = task.Retry(instructions);
+        if (preview.BaseCommit is not null) updated = updated with { RevisionCommit = preview.BaseCommit };
+        if (scope == "Restart")
+            updated = updated with { StepResults = [], ActiveStepId = null, RevisionCommit = preview.BaseCommit, AutoReviewAttempt = 0 };
+        else if (task.Workflow?.Steps is { } steps && (task.StepResults?.Length ?? 0) == steps.Length)
+            updated = updated with { StepResults = [], ActiveStepId = null };
         UpdateTask(c, tx, updated, expectedVersion);
-        Event(c, tx, taskId, "TaskRetried", updated.RevisionInstructions!);
+        Event(c, tx, taskId, "TaskRetried", preview.Summary + "\n" + updated.RevisionInstructions!);
         tx.Commit();
         return Task.FromResult(updated);
     }

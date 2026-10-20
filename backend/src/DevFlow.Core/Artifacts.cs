@@ -1,7 +1,7 @@
 namespace DevFlow.Core;
 public sealed record ArtifactInfo(string Path, long Bytes);
 public sealed record ArtifactPage(string Path, string Text, int Offset, int NextOffset, bool HasMore);
-public sealed record ValidationSummary(TddPhase Phase, int ExitCode, int Total, int Failed, string EvidencePath);
+public sealed record ValidationSummary(TddPhase Phase, int ExitCode, int Total, int Failed, string EvidencePath, Guid? StepId = null);
 public interface IRunArtifactReader
 {
     Task<IReadOnlyList<ArtifactInfo>> ListAsync(Guid runId, CancellationToken ct = default);

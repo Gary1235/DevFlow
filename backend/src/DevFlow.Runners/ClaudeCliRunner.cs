@@ -13,13 +13,13 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             TddPhase.Implementation => "Implement the approved requirements and appropriate tests. Preserve existing tests and behavior.",
             _ => throw new ArgumentOutOfRangeException(nameof(phase))
         };
-        await Invoke(task, workspace, runId, phase.ToString(), false,
+        await Invoke(task, workspace, runId, (task.ArtifactStage.StartsWith("Step-") ? task.ArtifactStage + "-" : "") + phase, false,
             instruction + "\nApproved plan: " + task.Plan?.Text + "\nReview feedback: " + task.RevisionInstructions, ct);
     }
     public async Task<string> PlanAsync(WorkTask task, Workspace workspace, Guid runId, CancellationToken ct)
     {
         var plan = await Invoke(task, workspace, runId, task.ArtifactStage, true,
-            (task.ReadOnlyInstruction ?? "Read repository instructions and source, including AGENTS.md and CLAUDE.md. Return an implementation plan for human approval: affected files, contracts, meaningful failing tests, steps, validation commands, risks, assumptions and questions.") + " Do not edit files. Previous plan: " + task.Plan?.Text, ct);
+            (task.ReadOnlyInstruction ?? "Read repository instructions and source, including AGENTS.md and CLAUDE.md. Return an implementation plan for human approval: affected files, contracts, meaningful failing tests, steps, validation commands, risks, assumptions and questions." + PlanContent.CompletionInstruction) + " Do not edit files. Previous plan: " + task.Plan?.Text, ct);
         plan = WorkTask.Required(plan, 40000);
         await File.WriteAllTextAsync(Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage + "-result.json"), JsonSerializer.Serialize(new { plan }), ct);
         return plan;
@@ -53,7 +53,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             DevFlow phase: {phase}
             {instruction}
             Follow repository instructions. Work only in this worktree. Do not commit, merge, push, change branches or Git history.
-            The orchestrator runs all validation commands independently. You have file tools only; no shell tools are provided.
+            The orchestrator runs all validation commands independently. Use the tools available in this session; never circumvent denied operations or permission checks.
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
@@ -65,7 +65,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
         var result = await process.RunAsync(executable, Arguments(selection, planning), workspace.Path, prompt, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.json"), result.StandardOutput, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.stderr.log"), result.StandardError, ct);
-        if (result.ExitCode != 0) throw new InvalidOperationException($"Claude Code {phase} exited with code {result.ExitCode}; check installation, login, account eligibility or model access in the CLI. See run artifacts.");
+        if (result.ExitCode != 0) throw CliExecutionErrors.Failed("Claude Code", phase, result);
         return ParseResult(result.StandardOutput);
     }
 }

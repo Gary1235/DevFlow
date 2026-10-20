@@ -2,7 +2,7 @@ using Microsoft.Extensions.Hosting;
 
 namespace DevFlow.Desktop;
 
-// Only enabled by the desktop launcher. EOF also shuts down services if the parent dies.
+// Enabled by desktop or development launchers. EOF shuts services down if the parent dies.
 public sealed class DesktopLifetime(IHostApplicationLifetime lifetime) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

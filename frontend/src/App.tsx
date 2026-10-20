@@ -1,29 +1,567 @@
-import {useEffect,useState} from 'react';
-import {api} from './api';
-import {useResource} from './hooks';
-import {filterTasks,formatDate,groups,selectionText,statusNames} from './domain';
-import {Badge,Empty,Heading,Meta,NoticeProvider,useNotice} from './components/ui';
-import {ProjectDialog,ProjectSettings,TaskDialog} from './components/TaskDialogs';
-import {AiConnections} from './components/AiConnections';
-import {TaskDetail} from './components/TaskDetail';
-import {Discussions} from './components/Discussions';
-import {RulesLibrary} from './components/RulesLibrary';
-import {StoragePage} from './components/StoragePage';
-import type {BaseData,Project,WorkTask} from './types';
-const loadBase=async(signal:AbortSignal):Promise<BaseData>=>{const [projects,tasks,providers]=await Promise.all([api<BaseData['projects']>('/api/projects','GET',undefined,{signal}),api<BaseData['tasks']>('/api/tasks','GET',undefined,{signal}),api<BaseData['providers']>('/api/ai/providers','GET',undefined,{signal})]);return{projects,tasks,providers};};
-function useHash(){const [hash,setHash]=useState(location.hash.slice(1)||'overview');useEffect(()=>{const listener=()=>setHash(location.hash.slice(1)||'overview');window.addEventListener('hashchange',listener);return()=>window.removeEventListener('hashchange',listener);},[]);return hash;}
-function TaskTable({tasks,projects,onCreate}:{tasks:WorkTask[];projects:Project[];onCreate:()=>void}){if(!tasks.length)return <Empty title="這裡還沒有任務" description="建立需求，選擇 AI，讓流程開始。"><button className="primary" onClick={onCreate}>建立第一個任務</button></Empty>;return <div className="table-wrap"><table><thead><tr>{['任務 / 專案','狀態','規劃 → 實作','建立時間',''].map((v,i)=><th key={i}>{v}</th>)}</tr></thead><tbody>{tasks.map(t=><tr key={t.id}><td><a className="task-title" href={'#task/'+t.id}>{t.title}</a><div className="subline">{projects.find(p=>p.id===t.projectId)?.name}</div></td><td><Badge status={t.status}/></td><td><div>{selectionText(t.ai?.planning)}</div><div className="subline">→ {selectionText(t.ai?.implementation)}</div></td><td>{formatDate(t.createdAt)}</td><td><a className="text-link" href={'#task/'+t.id}>查看 →</a></td></tr>)}</tbody></table></div>;}
-function Workbench(){
-  const base=useResource('base',loadBase),hash=useHash(),notice=useNotice(),[project,setProject]=useState(''),[search,setSearch]=useState(''),[group,setGroup]=useState(''),[status,setStatus]=useState(''),[dialog,setDialog]=useState<'task'|'project'|null>(null),[settings,setSettings]=useState<Project|null>(null);
-  const data=base.data||{projects:[],tasks:[],providers:[]},match=/^task\/([a-f0-9-]{36})$/i.exec(hash),discussionId=/^discussion\/([a-f0-9-]{36})$/i.exec(hash)?.[1].toLowerCase(),taskId=match?.[1].toLowerCase(),view=taskId?'detail':discussionId?'discussions':['overview','tasks','projects','ai','rules','discussions','storage'].includes(hash)?hash:'overview',scoped=filterTasks(data.tasks,{project}),visible=filterTasks(data.tasks,{project,search,group,status}),reviewCount=scoped.filter(t=>groups.review.includes(t.status)).length;
-  function newTask(){if(!data.projects.length){notice('請先登錄本地專案。');location.hash='#projects';return;}setDialog('task');}
-  const heading={overview:'總覽',tasks:'任務工作台',projects:'專案',ai:'AI 連線',detail:'任務詳情',discussions:'討論',rules:'規則庫',storage:'儲存空間'}[view];
-  const metrics=[['任務總數',scoped.length,'目前專案範圍','◈',''],['執行與排隊',scoped.filter(t=>groups.active.includes(t.status)).length,'規劃、實作與合併','↗','blue'],['待人工處理',reviewCount,'計畫、成果與本地合併','◷','amber'],['已完成合併',scoped.filter(t=>t.status==='Merged').length,'已保存成果 commit','✓','']];
-  return <><aside className="sidebar"><a className="brand" href="#overview"><span className="brand-mark">D</span>DevFlow<span className="version">0.7</span></a><div className="workspace-label">本地開發空間</div><nav aria-label="主要導覽">{[['overview','◈','總覽'],['discussions','◇','討論'],['tasks','▤','任務工作台'],['rules','≡','規則庫'],['projects','⌘','專案'],['ai','◎','AI 連線'],['storage','▣','儲存空間']].map(([id,icon,label])=><a key={id} href={'#'+id} className={(view==='detail'?'tasks':view)===id?'active':''}><span>{icon}</span>{label}{id==='tasks'&&reviewCount>0&&<span className="nav-count">{reviewCount}</span>}</a>)}</nav><div className="sidebar-bottom"><span className="local-dot"/> CLI 驅動 · 人工審核<p>每個成果，都有測試證據。</p></div></aside><div className="app-shell"><header className="topbar"><div className="breadcrumb">工作空間 <span>/</span><strong>{heading}</strong></div><div className="topbar-actions"><select aria-label="篩選專案" value={project} onChange={e=>setProject(e.target.value)}><option value="">所有專案</option>{data.projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><span className={'connection'+(base.error?' error':'')}><i/>{base.error?'API 未連線':base.data?'API 已連線':'連線中'}</span><button className="primary" disabled={!data.projects.length} onClick={newTask}>＋ 新增任務</button></div></header><main>{base.error&&<div className="offline"><strong>{base.error}</strong><span>正在編輯的內容會保留。</span><button className="secondary" onClick={base.refresh}>重新連線</button></div>}{!base.data&&!base.error&&<Empty title="讀取工作空間…"/>}
-  {view==='overview'&&<><Heading eyebrow="WORKSPACE OVERVIEW" title="開發總覽" description="把規劃、實作與審核放在同一條流程上。"><button className="secondary" onClick={base.refresh}>↻ 更新狀態</button></Heading><div className="metric-grid">{metrics.map(([label,value,note,icon,cls])=><div className={'metric '+cls} key={label}><div className="metric-label">{label}</div><strong>{value}</strong><div className="metric-note">{note}</div><span className="metric-icon">{icon}</span></div>)}</div><div className="overview-grid"><article className="panel"><div className="panel-heading"><div><h2>待你處理</h2><p>人工核准後，流程才會繼續。</p></div><a className="text-link" href="#tasks">查看任務 →</a></div>{scoped.filter(t=>groups.review.includes(t.status)||groups.failed.includes(t.status)).slice(0,5).map(t=><div className="attention-item" key={t.id}><a href={'#task/'+t.id}><strong>{t.title}</strong><p>{data.projects.find(p=>p.id===t.projectId)?.name} · {statusNames[t.status]}</p></a><a href={'#task/'+t.id}>處理 →</a></div>)}{!scoped.some(t=>groups.review.includes(t.status)||groups.failed.includes(t.status))&&<Empty title="目前沒有待處理事項" description="新的計畫、成果或失敗任務會顯示在這裡。"/>}</article><article className="panel flow-panel"><div className="panel-heading"><h2>你的開發流程</h2><span className="chip neutral">TDD</span></div><ol className="workflow">{[['01','規劃與核准','選擇 AI，確認計畫版本。'],['02','隔離實作','Worktree · Baseline → Red → Green → Refactor'],['03','審核與合併','檢查差異與測試，再合併至本地分支。']].map(([n,title,desc])=><li key={n}><span>{n}</span><div><strong>{title}</strong><p>{desc}</p></div></li>)}</ol><p className="footnote">排隊中的任務需要 Worker 啟動後才會執行。</p></article></div><article className="panel"><div className="panel-heading"><h2>最近任務</h2></div><TaskTable tasks={scoped.slice(0,6)} projects={data.projects} onCreate={newTask}/></article></>}
-  {view==='tasks'&&<><Heading eyebrow="TASK WORKSPACE" title="任務工作台" description="從需求到成果，每個階段都可追溯。"/><div className="filter-bar"><div className="tabs">{[['','全部'],['active','執行中'],['review','待審核'],['failed','需處理'],['done','已結束']].map(([id,label])=><button key={id} className={group===id?'active':''} aria-pressed={group===id} onClick={()=>setGroup(id)}>{label}</button>)}</div><div className="filters"><input aria-label="搜尋任務" placeholder="搜尋任務名稱、需求或 ID" value={search} onChange={e=>setSearch(e.target.value)}/><select aria-label="任務狀態" value={status} onChange={e=>setStatus(e.target.value)}><option value="">所有狀態</option>{Object.entries(statusNames).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></div></div><article className="panel table-panel">{!visible.length&&data.tasks.length?<Empty title="沒有符合條件的任務" description="試著調整專案、搜尋或狀態條件。"/>:<TaskTable tasks={visible} projects={data.projects} onCreate={newTask}/>}<div className="table-footer">共 {visible.length} 個任務 · 每五秒更新</div></article></>}
-  {view==='projects'&&<><Heading eyebrow="PROJECTS" title="專案" description="連結本地 Repository，設定測試與 AI 預設。"><button className="primary" onClick={()=>setDialog('project')}>＋ 登錄專案</button></Heading><div className="project-grid">{!data.projects.length&&<Empty title="登錄你的第一個專案"/>}{data.projects.map(p=><article className="panel project-card" key={p.id}><div className="project-heading"><div className="project-icon">⌘</div><div><h2>{p.name}</h2><p>{p.baseBranch} · {data.tasks.filter(t=>t.projectId===p.id).length} 個任務</p></div></div><div className="project-path">{p.repositoryPath}</div><div className="project-defaults"><Meta label="規劃預設" value={selectionText(p.aiDefaults?.planning)}/><Meta label="實作預設" value={selectionText(p.aiDefaults?.implementation)}/></div><div className="button-row"><button className="secondary" onClick={()=>{setProject(p.id);location.hash='#tasks';}}>查看任務</button><button className="secondary" onClick={()=>setSettings(p)}>AI 預設</button></div></article>)}</div></>}
-  {view==='storage'&&<StoragePage/>}{view==='rules'&&<RulesLibrary projects={data.projects} onChanged={base.refresh}/>}{view==='discussions'&&<Discussions data={data} projectId={project} discussionId={discussionId} onTaskCreated={()=>base.refresh()}/>}{view==='ai'&&<AiConnections providers={data.providers}/>}{taskId&&<TaskDetail key={taskId} taskId={taskId} projects={data.projects} onChanged={base.refresh}/>}</main><footer>DevFlow v0.7 · React 工作台 · 成果由你核准</footer></div>
-  {dialog==='task'&&<TaskDialog data={data} projectId={project} onClose={()=>setDialog(null)} onCreated={t=>{setDialog(null);base.refresh();location.hash='#task/'+t.id;}}/>}{dialog==='project'&&<ProjectDialog onClose={()=>setDialog(null)} onCreated={p=>{setProject(p.id);setDialog(null);base.refresh();}}/>}{settings&&<ProjectSettings project={settings} data={data} onClose={()=>setSettings(null)} onSaved={base.refresh}/>}</>;
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api } from './api';
+import { useResource } from './hooks';
+import { filterTasks, formatDate, groups, selectionText, statusNames } from './domain';
+import { Badge, Empty, Heading, Meta, NoticeProvider, useNotice } from './components/ui';
+import { ProjectDialog, ProjectSettings, TaskDialog } from './components/TaskDialogs';
+import { AiConnections } from './components/AiConnections';
+import { TaskDetail } from './components/TaskDetail';
+import { RulesLibrary } from './components/RulesLibrary';
+import { StoragePage } from './components/StoragePage';
+import { WorkerConnection } from './components/WorkerStatus';
+import { PermissionSettings } from './components/PermissionSettings';
+import { TitleActivity, taskTitleState } from './components/TitleActivity';
+import type { BaseData, Project, WorkTask } from './types';
+
+function useHash() {
+  const [hash, setHash] = useState(location.hash.slice(1) || 'overview');
+  useEffect(() => {
+    const handleHashChange = () => setHash(location.hash.slice(1) || 'overview');
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+  return hash;
 }
-export default function App(){return <NoticeProvider><Workbench/></NoticeProvider>;}
+
+function TaskTable({
+  tasks,
+  projects,
+  onCreate,
+}: {
+  tasks: WorkTask[];
+  projects: Project[];
+  onCreate: () => void;
+}) {
+  if (!tasks.length) {
+    return (
+      <Empty title="這裡還沒有任務" description="建立需求，選擇 AI，讓流程開始。">
+        <button className="primary" onClick={onCreate}>
+          建立第一個任務
+        </button>
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {['任務 / 專案', '目前狀態', '規劃 → 實作流程', '建立時間', '操作'].map((headerLabel, columnIndex) => (
+              <th key={columnIndex}>{headerLabel}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {tasks.map(taskItem => {
+            const needsAction =
+              groups.review.includes(taskItem.status) || groups.failed.includes(taskItem.status);
+            const matchedProject = projects.find(projectItem => projectItem.id === taskItem.projectId);
+            return (
+              <tr key={taskItem.id} className={needsAction ? 'row-highlight' : ''}>
+                <td>
+                  <a className="task-title" href={'#task/' + taskItem.id}>
+                    {taskItem.title}
+                    <TitleActivity state={taskTitleState(taskItem.status)} compact />
+                  </a>
+                  <div className="subline">{matchedProject?.name || '未指定專案'}</div>
+                </td>
+                <td>
+                  <Badge status={taskItem.status} />
+                </td>
+                <td>
+                  <div className="flow-summary">{selectionText(taskItem.ai?.planning)}</div>
+                  <div className="subline">
+                    →{' '}
+                    {taskItem.workflow?.steps
+                      ? taskItem.workflow.steps.map(stepItem => stepItem.name).join(' → ')
+                      : selectionText(taskItem.ai?.implementation)}
+                  </div>
+                </td>
+                <td>{formatDate(taskItem.createdAt)}</td>
+                <td>
+                  <a className={needsAction ? 'action-pill' : 'text-link'} href={'#task/' + taskItem.id}>
+                    {needsAction ? '立即處理 →' : '查看 →'}
+                  </a>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Workbench() {
+  const cachedProvidersRef = useRef<BaseData['providers'] | null>(null);
+  const loadBase = useCallback(async (signal: AbortSignal): Promise<BaseData> => {
+    const [projects, tasks, providers] = await Promise.all([
+      api<BaseData['projects']>('/api/projects', 'GET', undefined, { signal }),
+      api<BaseData['tasks']>('/api/tasks', 'GET', undefined, { signal }),
+      cachedProvidersRef.current
+        ? Promise.resolve(cachedProvidersRef.current)
+        : api<BaseData['providers']>('/api/ai/providers', 'GET', undefined, { signal }),
+    ]);
+    cachedProvidersRef.current = providers;
+    return { projects, tasks, providers };
+  }, []);
+
+  const base = useResource('base', loadBase);
+  const hash = useHash();
+  const notice = useNotice();
+  const [project, setProject] = useState('');
+  const [search, setSearch] = useState('');
+  const [group, setGroup] = useState('');
+  const [status, setStatus] = useState('');
+  const [dialog, setDialog] = useState<'task' | 'project' | null>(null);
+  const [settings, setSettings] = useState<Project | null>(null);
+
+  const data = base.data || { projects: [], tasks: [], providers: [] };
+  const match = /^task\/([a-f0-9-]{36})$/i.exec(hash);
+  const taskId = match?.[1].toLowerCase();
+  const view = taskId
+    ? 'detail'
+    : ['overview', 'tasks', 'projects', 'ai', 'rules', 'storage', 'permissions'].includes(hash)
+      ? hash
+      : 'overview';
+
+  const scoped = filterTasks(data.tasks, { project });
+  const visible = filterTasks(data.tasks, { project, search, group, status });
+  const reviewCount = scoped.filter(taskItem => groups.review.includes(taskItem.status)).length;
+
+  function newTask() {
+    if (!data.projects.length) {
+      notice('請先登錄本地專案。');
+      location.hash = '#projects';
+      return;
+    }
+    setDialog('task');
+  }
+
+  const heading = {
+    overview: '總覽',
+    tasks: '任務工作台',
+    projects: '專案',
+    ai: 'AI 連線',
+    detail: '任務詳情',
+    rules: '規則庫',
+    storage: '儲存空間',
+    permissions: '工具權限設定',
+  }[view];
+
+  const metrics = [
+    ['任務總數', scoped.length, '目前專案範圍', '◈', ''],
+    [
+      '執行與排隊',
+      scoped.filter(taskItem => groups.active.includes(taskItem.status)).length,
+      '規劃與 AI 指揮實作',
+      '↗',
+      'blue',
+    ],
+    ['待人工確認', reviewCount, '計畫確認、超規問題與最終驗收', '◷', 'amber'],
+    [
+      '已完成合併',
+      scoped.filter(taskItem => taskItem.status === 'Merged').length,
+      '已合併回本地分支',
+      '✓',
+      '',
+    ],
+  ];
+
+  const attentionTasks = scoped.filter(
+    taskItem => groups.review.includes(taskItem.status) || groups.failed.includes(taskItem.status)
+  );
+  const activeTasks = scoped.filter(taskItem => groups.active.includes(taskItem.status));
+
+  return (
+    <>
+      <aside className="sidebar">
+        <a className="brand" href="#overview">
+          <span className="brand-mark">D</span>DevFlow<span className="version">0.7</span>
+        </a>
+        <div className="workspace-label">本地開發空間</div>
+        <nav aria-label="主要導覽">
+          {[
+            ['overview', '◈', '總覽'],
+            ['tasks', '▤', '任務工作台'],
+            ['rules', '≡', '規則庫'],
+            ['projects', '⌘', '專案'],
+            ['ai', '◎', 'AI 連線'],
+            ['storage', '▣', '儲存空間'],
+            ['permissions', '⚿', '工具權限'],
+          ].map(([navigationId, iconSymbol, labelText]) => (
+            <a
+              key={navigationId}
+              href={'#' + navigationId}
+              className={(view === 'detail' ? 'tasks' : view) === navigationId ? 'active' : ''}
+            >
+              <span>{iconSymbol}</span>
+              {labelText}
+              {navigationId === 'tasks' && reviewCount > 0 && (
+                <span className="nav-count">{reviewCount}</span>
+              )}
+            </a>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <span className="local-dot" /> CLI 驅動 · 人工審核
+          <p>每個成果，都有測試證據。</p>
+        </div>
+      </aside>
+
+      <div className="app-shell">
+        <header className="topbar">
+          <div className="breadcrumb">
+            工作空間 <span>/</span>
+            <strong>{heading}</strong>
+          </div>
+          <div className="topbar-actions">
+            <select
+              aria-label="篩選專案"
+              value={project}
+              onChange={event => setProject(event.target.value)}
+            >
+              <option value="">所有專案</option>
+              {data.projects.map(projectItem => (
+                <option key={projectItem.id} value={projectItem.id}>
+                  {projectItem.name}
+                </option>
+              ))}
+            </select>
+            <span className={'connection' + (base.error ? ' error' : '')}>
+              <i />
+              {base.error ? 'API 未連線' : base.data ? 'API 已連線' : '連線中'}
+            </span>
+            <WorkerConnection/>
+            <button className="primary" disabled={!data.projects.length} onClick={newTask}>
+              ＋ 新增任務
+            </button>
+          </div>
+        </header>
+
+        <main>
+          {base.error && (
+            <div className="offline">
+              <strong>{base.error}</strong>
+              <span>正在編輯的內容會保留。</span>
+              <button className="secondary" onClick={base.refresh}>
+                重新連線
+              </button>
+            </div>
+          )}
+          {!base.data && !base.error && <Empty title="讀取工作空間…" />}
+
+          {view === 'overview' && (
+            <>
+              <Heading
+                eyebrow="WORKSPACE OVERVIEW"
+                title="開發總覽"
+                description="把規劃、實作與審核放在同一條流程上。"
+              >
+                <button className="secondary" onClick={base.refresh}>
+                  ↻ 更新狀態
+                </button>
+              </Heading>
+              <div className="metric-grid">
+                {metrics.map(([labelText, metricValue, noteText, iconSymbol, toneClass]) => (
+                  <div className={'metric ' + toneClass} key={String(labelText)}>
+                    <div className="metric-label">{labelText}</div>
+                    <strong>{metricValue}</strong>
+                    <div className="metric-note">{noteText}</div>
+                    <span className="metric-icon">{iconSymbol}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="overview-grid">
+                <article className="panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>待你處理 ({attentionTasks.length})</h2>
+                      <p>人工核准或處理異常後，流程才會繼續推進。</p>
+                    </div>
+                    <a className="text-link" href="#tasks">
+                      查看全部任務 →
+                    </a>
+                  </div>
+                  {attentionTasks.slice(0, 6).map(taskItem => (
+                    <div className="attention-item" key={taskItem.id}>
+                      <div className="attention-main">
+                        <div className="attention-top">
+                          <Badge status={taskItem.status} />
+                          <span className="subline">
+                            {data.projects.find(projectItem => projectItem.id === taskItem.projectId)?.name}
+                          </span>
+                        </div>
+                        <a href={'#task/' + taskItem.id}>
+                          <strong>{taskItem.title}</strong>
+                          <p>
+                            {taskItem.status === 'AwaitingApproval'
+                              ? 'AI 規劃已完成，等待你確認計畫'
+                              : taskItem.status === 'AwaitingStepApproval'
+                                ? '超出規則問題或階段確認點，等待你回覆確認'
+                                : taskItem.status === 'AwaitingReview'
+                                  ? '全部實作完成，請檢查差異並驗收'
+                                  : taskItem.status === 'Approved'
+                                    ? '驗收已核准，可執行本地分支合併'
+                                    : '執行或規劃受阻，請檢查紀錄並重試'}
+                          </p>
+                        </a>
+                      </div>
+                      <a className="action-pill" href={'#task/' + taskItem.id}>
+                        處理 →
+                      </a>
+                    </div>
+                  ))}
+                  {!attentionTasks.length && (
+                    <Empty
+                      title="目前沒有待處理事項"
+                      description="新的計畫確認、超規提問或待驗收成果會顯示在這裡。"
+                    />
+                  )}
+                </article>
+
+                <article className="panel flow-panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>執行中與佇列 ({activeTasks.length})</h2>
+                      <p>規劃 AI 總指揮與分階段實作進度。</p>
+                    </div>
+                    <span className="chip blue">AI 指揮實作</span>
+                  </div>
+                  {activeTasks.length > 0 ? (
+                    <div className="active-task-list">
+                      {activeTasks.slice(0, 4).map(activeTask => (
+                        <div className="attention-item" key={activeTask.id}>
+                          <div className="attention-main">
+                            <div className="attention-top">
+                              <Badge status={activeTask.status} />
+                              <span className="subline">
+                                {data.projects.find(projectItem => projectItem.id === activeTask.projectId)?.name}
+                              </span>
+                            </div>
+                            <a href={'#task/' + activeTask.id}>
+                              <strong>{activeTask.title}</strong>
+                              <TitleActivity state={taskTitleState(activeTask.status)} compact />
+                            </a>
+                          </div>
+                          <a className="text-link" href={'#task/' + activeTask.id}>
+                            監看 →
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <ol className="workflow">
+                      {[
+                        ['01', 'AI 規劃 → 你確認', '綁定專案與規則，由規劃 AI 擬定計畫交由你確認。'],
+                        ['02', 'AI 指揮 AI 實作', '依序執行前後端模型；規則內問題由規劃 AI 直接回覆，超出規則才請你確認。'],
+                        ['03', '最終驗收與本地合併', '檢視完整程式碼差異，驗收確認後合併回本地端分支。'],
+                      ].map(([stepNumber, titleText, descriptionText]) => (
+                        <li key={stepNumber}>
+                          <span>{stepNumber}</span>
+                          <div>
+                            <strong>{titleText}</strong>
+                            <p>{descriptionText}</p>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  <p className="footnote">排隊中的任務需要 Worker 啟動後才會執行。</p>
+                </article>
+              </div>
+
+              <article className="panel table-panel">
+                <div className="panel-heading table-panel-header">
+                  <div>
+                    <h2>最近任務</h2>
+                    <p>點擊任務進入計畫、執行紀錄與差異審核。</p>
+                  </div>
+                  <a className="text-link" href="#tasks">
+                    前往任務工作台 →
+                  </a>
+                </div>
+                <TaskTable tasks={scoped.slice(0, 8)} projects={data.projects} onCreate={newTask} />
+              </article>
+            </>
+          )}
+
+          {view === 'tasks' && (
+            <>
+              <Heading
+                eyebrow="TASK WORKSPACE"
+                title="任務工作台"
+                description="從需求到成果，每個階段都可追溯。"
+              />
+              <div className="filter-bar">
+                <div className="tabs">
+                  {[
+                    ['', '全部 (' + scoped.length + ')'],
+                    [
+                      'active',
+                      '執行中 (' +
+                        scoped.filter(taskItem => groups.active.includes(taskItem.status)).length +
+                        ')',
+                    ],
+                    ['review', '待審核 (' + reviewCount + ')'],
+                    [
+                      'failed',
+                      '需處理 (' +
+                        scoped.filter(taskItem => groups.failed.includes(taskItem.status)).length +
+                        ')',
+                    ],
+                    [
+                      'done',
+                      '已結束 (' +
+                        scoped.filter(taskItem => groups.done.includes(taskItem.status)).length +
+                        ')',
+                    ],
+                  ].map(([groupKey, labelText]) => (
+                    <button
+                      key={groupKey}
+                      className={group === groupKey ? 'active' : ''}
+                      aria-pressed={group === groupKey}
+                      onClick={() => setGroup(groupKey)}
+                    >
+                      {labelText}
+                    </button>
+                  ))}
+                </div>
+                <div className="filters">
+                  <input
+                    aria-label="搜尋任務"
+                    placeholder="搜尋任務名稱、需求或 ID"
+                    value={search}
+                    onChange={event => setSearch(event.target.value)}
+                  />
+                  <select
+                    aria-label="任務狀態"
+                    value={status}
+                    onChange={event => setStatus(event.target.value)}
+                  >
+                    <option value="">所有狀態</option>
+                    {Object.entries(statusNames).map(([statusKey, labelText]) => (
+                      <option key={statusKey} value={statusKey}>
+                        {labelText}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <article className="panel table-panel">
+                {!visible.length && data.tasks.length ? (
+                  <Empty title="沒有符合條件的任務" description="試著調整專案、搜尋或狀態條件。" />
+                ) : (
+                  <TaskTable tasks={visible} projects={data.projects} onCreate={newTask} />
+                )}
+                <div className="table-footer">共 {visible.length} 個任務 · 每五秒更新</div>
+              </article>
+            </>
+          )}
+
+          {view === 'projects' && (
+            <>
+              <Heading
+                eyebrow="PROJECTS"
+                title="專案"
+                description="連結本地 Repository，設定測試與 AI 預設。"
+              >
+                <button className="primary" onClick={() => setDialog('project')}>
+                  ＋ 登錄專案
+                </button>
+              </Heading>
+              <div className="project-grid">
+                {!data.projects.length && <Empty title="登錄你的第一個專案" />}
+                {data.projects.map(projectItem => (
+                  <article className="panel project-card" key={projectItem.id}>
+                    <div className="project-heading">
+                      <div className="project-icon">⌘</div>
+                      <div>
+                        <h2>{projectItem.name}</h2>
+                        <p>
+                          {projectItem.baseBranch} ·{' '}
+                          {data.tasks.filter(taskItem => taskItem.projectId === projectItem.id).length} 個任務
+                        </p>
+                      </div>
+                    </div>
+                    <div className="project-path">{projectItem.repositoryPath}</div>
+                    <div className="project-defaults">
+                      <Meta label="規劃預設" value={selectionText(projectItem.aiDefaults?.planning)} />
+                      <Meta
+                        label="實作預設"
+                        value={selectionText(projectItem.aiDefaults?.implementation)}
+                      />
+                    </div>
+                    <div className="button-row">
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          setProject(projectItem.id);
+                          location.hash = '#tasks';
+                        }}
+                      >
+                        查看任務
+                      </button>
+                      <button className="secondary" onClick={() => setSettings(projectItem)}>
+                        AI 預設
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
+
+          {view === 'storage' && <StoragePage />}
+          {view === 'rules' && <RulesLibrary projects={data.projects} onChanged={base.refresh} />}
+          {view === 'ai' && <AiConnections providers={data.providers} />}
+          {view === 'permissions' && <PermissionSettings projects={data.projects} tasks={data.tasks} projectId={project} />}
+          {taskId && (
+            <TaskDetail key={taskId} taskId={taskId} projects={data.projects} onChanged={base.refresh} />
+          )}
+        </main>
+        <footer>DevFlow v0.7 · React 工作台 · 成果由你核准</footer>
+      </div>
+
+      {dialog === 'task' && (
+        <TaskDialog
+          data={data}
+          projectId={project}
+          onClose={() => setDialog(null)}
+          onCreated={createdTask => {
+            setDialog(null);
+            base.refresh();
+            location.hash = '#task/' + createdTask.id;
+          }}
+        />
+      )}
+      {dialog === 'project' && (
+        <ProjectDialog
+          onClose={() => setDialog(null)}
+          onCreated={createdProject => {
+            setProject(createdProject.id);
+            setDialog(null);
+            base.refresh();
+          }}
+        />
+      )}
+      {settings && (
+        <ProjectSettings
+          project={settings}
+          data={data}
+          onClose={() => setSettings(null)}
+          onSaved={base.refresh}
+        />
+      )}
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <NoticeProvider>
+      <Workbench />
+    </NoticeProvider>
+  );
+}

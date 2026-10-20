@@ -25,7 +25,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             Review feedback and retry instructions: {task.RevisionInstructions}
             {TaskInstructions.For(task, "Implementation")}
             """;
-        var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
+        var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage.StartsWith("Step-") ? task.ArtifactStage : "");
         Directory.CreateDirectory(directory);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-prompt.txt"), prompt, ct);
         var selection = AiSelection.Normalize(task.Ai?.Implementation);
@@ -39,6 +39,6 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             workspace.Path, prompt, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-agent.jsonl"), result.StandardOutput, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, $"{phase}-agent.stderr.log"), result.StandardError, ct);
-        if (result.ExitCode != 0) throw new InvalidOperationException($"Codex {phase} exited with code {result.ExitCode}; see run artifacts.");
+        if (result.ExitCode != 0) throw CliExecutionErrors.Failed("Codex", phase.ToString(), result);
     }
 }

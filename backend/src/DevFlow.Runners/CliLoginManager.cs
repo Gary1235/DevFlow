@@ -74,7 +74,7 @@ public sealed class CliLoginManager(CliRegistry registry, ILoginTerminalLauncher
             { throw new ConflictException("Cannot open the CLI login terminal; check local permissions."); }
             var now = time.GetUtcNow();
             var session = new CliLoginSession(Guid.NewGuid(), provider, mode, "WaitingForUser", now, now.AddMinutes(15),
-                provider == "gemini" ? "請在開啟的 Gemini 終端選擇 Google 登入，完成後輸入 /quit，再執行連線測試。" : "請在開啟的官方 CLI 終端／瀏覽器完成登入。登入結束後重新檢查狀態。");
+                provider == "antigravity" ? "請在開啟的 agy 終端完成 Google 登入，完成後輸入 /exit，再執行連線測試。" : provider == "gemini" ? "請在開啟的 Gemini 終端選擇 Google 登入，完成後輸入 /quit，再執行連線測試。" : "請在開啟的官方 CLI 終端／瀏覽器完成登入。登入結束後重新檢查狀態。");
             sessions.Add(session.Id, new(session, terminal));
             cleanup ??= new Timer(_ => Sweep(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
             return session;

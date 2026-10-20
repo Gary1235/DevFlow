@@ -28,6 +28,14 @@ public sealed class InfrastructureTests : IAsyncLifetime
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("10.", result.StandardOutput);
     }
+    [Fact] public async Task Process_runner_sends_chinese_and_emoji_as_utf8_without_bom()
+    {
+        const string input = "在選單新增測試項目\n中文 API 🙂";
+        const string script = "$stream = [Console]::OpenStandardInput(); $bytes = New-Object IO.MemoryStream; $stream.CopyTo($bytes); [Console]::Out.Write([Convert]::ToBase64String($bytes.ToArray()))";
+        var result = await new ProcessRunner().RunAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], directory, input, default);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(input)), result.StandardOutput);
+    }
     [Fact] public async Task Process_runner_cancellation_terminates_child_promptly()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));

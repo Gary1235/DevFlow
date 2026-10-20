@@ -43,4 +43,17 @@ public sealed class ValidationTests : IAsyncLifetime
             .ValidateAsync(new(Guid.NewGuid(), "Demo", directory, "main", args), new(directory, "base"),
                 Guid.NewGuid(), TddPhase.Red, CancellationToken.None));
     }
+    [Fact] public async Task Repeated_phases_in_different_steps_keep_separate_evidence_and_step_identity()
+    {
+        var run = Guid.NewGuid(); var first = Guid.NewGuid(); var second = Guid.NewGuid();
+        var validator = new DotnetValidationRunner(new ReportProcess(), directory);
+        var project = new ProjectDefinition(Guid.NewGuid(), "Demo", directory, "main", ["test"]);
+        foreach (var id in new[] { first, second })
+            await validator.ForStep(id).ValidateAsync(project, new(directory, "base"), run, TddPhase.Green, default);
+        var summaries = await new RunArtifactReader(directory).ValidationsAsync(run);
+        Assert.Equal(2, summaries.Count);
+        Assert.Contains(summaries, s => s.StepId == first && s.Total == 2);
+        Assert.Contains(summaries, s => s.StepId == second && s.Total == 2);
+        Assert.NotEqual(summaries[0].EvidencePath, summaries[1].EvidencePath);
+    }
 }

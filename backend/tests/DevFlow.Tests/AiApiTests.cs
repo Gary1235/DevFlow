@@ -82,7 +82,7 @@ public sealed class AiApiTests : IAsyncLifetime
         var response = await client.GetAsync("/api/ai/providers");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var providers = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Contains(providers.EnumerateArray(), p => p.GetProperty("id").GetString() == "gemini");
+        Assert.Contains(providers.EnumerateArray(), p => p.GetProperty("id").GetString() == "antigravity");
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/")).StatusCode);
     }
     [Fact] public async Task Login_requires_explicit_local_action_and_unknown_sessions_return_404()

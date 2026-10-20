@@ -1,0 +1,9 @@
+{
+  "name": "devflow-local",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:backend": "node scripts/dev.mjs --backend-only",
+    "test:launcher": "node --test scripts/dev.test.mjs"
+  }
+}

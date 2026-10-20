@@ -1,0 +1,9 @@
+.failure-recovery{border:1px solid #e9c4a4;background:#fff9f3;border-radius:12px;padding:16px 20px;margin:16px 0;color:#764e29;font-size:14px}
+.failure-recovery p{line-height:1.6;margin:8px 0 12px}
+.failure-recovery details{margin-top:12px;overflow-wrap:anywhere}
+.failure-recovery summary{cursor:pointer}
+.retry-panel{max-width:920px}
+.retry-preview{padding:14px 16px;border-radius:10px;background:#f3f7f5;border:1px solid #d9e5de;margin:14px 0}
+.retry-preview dl{display:grid;grid-template-columns:max-content 1fr;gap:8px 16px;font-size:14px}
+.retry-preview dd{margin:0;overflow-wrap:anywhere}
+.retry-preview p{font-size:13px;color:#647568;line-height:1.6}

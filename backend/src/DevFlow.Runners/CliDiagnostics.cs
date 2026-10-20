@@ -11,16 +11,57 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
     private string? configuredDefaultModel;
     private string? catalogState;
     private string? catalogMessage;
+    private readonly SemaphoreSlim antigravityModelsLock = new(1, 1);
+    private CliProvider? antigravityCache;
+    private DateTimeOffset antigravityCacheUntil;
 
     public async Task<IReadOnlyList<CliProvider>> ListProvidersAsync(CancellationToken ct = default, bool refresh = false)
     {
         var providers = registry.List().ToArray();
+        var agyIndex = Array.FindIndex(providers, p => p.Id == "antigravity" && p.Installed);
+        var agy = agyIndex >= 0 ? DiscoverAntigravityModelsAsync(providers[agyIndex], ct, refresh) : null;
         var codexIndex = Array.FindIndex(providers, p => p.Id == "codex" && p.Installed);
-        if (codexIndex < 0) return providers;
-        var models = await DiscoverCodexModelsAsync(ct, refresh);
-        providers[codexIndex] = providers[codexIndex] with { Models = models.Select(m => m.Id).ToArray(), ModelDetails = models, ModelsVerified = false,
-            ConfiguredDefaultModel = configuredDefaultModel, ModelCatalogState = catalogState, ModelCatalogMessage = catalogMessage };
+        if (codexIndex >= 0)
+        {
+            var models = await DiscoverCodexModelsAsync(ct, refresh);
+            providers[codexIndex] = providers[codexIndex] with { Models = models.Select(m => m.Id).ToArray(), ModelDetails = models, ModelsVerified = false,
+                ConfiguredDefaultModel = configuredDefaultModel, ModelCatalogState = catalogState, ModelCatalogMessage = catalogMessage };
+        }
+        if (agy is not null) providers[agyIndex] = await agy;
         return providers;
+    }
+
+    private async Task<CliProvider> DiscoverAntigravityModelsAsync(CliProvider provider, CancellationToken ct, bool refresh)
+    {
+        await antigravityModelsLock.WaitAsync(ct);
+        try
+        {
+            if (!refresh && antigravityCache is not null && antigravityCacheUntil > DateTimeOffset.UtcNow) return antigravityCache;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            try
+            {
+                var command = registry.Require("antigravity");
+                var result = await process.RunAsync(command.Executable, [.. command.PrefixArguments, "models"], PrepareDirectory(), null, timeout.Token);
+                if (result.ExitCode != 0) throw new InvalidOperationException("Model listing failed.");
+                var models = result.StandardOutput.Split('\n').Select(line => System.Text.RegularExpressions.Regex.Match(line.Trim(), @"\A([A-Za-z0-9][A-Za-z0-9._:/-]*)(?:\t+| {2,})(.+)\z"))
+                    .Where(match => match.Success && match.Groups[1].Value.Contains('-'))
+                    .Select(match => new CliModelOption(AiSelection.Normalize(new("antigravity", match.Groups[1].Value)).Model!, match.Groups[2].Value.Trim(), ["low", "medium", "high"]))
+                    .DistinctBy(m => m.Id).ToArray();
+                if (models.Length == 0) throw new InvalidOperationException("Unrecognized model list.");
+                antigravityCache = provider with { Models = models.Select(m => m.Id).ToArray(), ModelDetails = models,
+                    ModelCatalogState = "Ready", ModelCatalogMessage = "已讀取 agy models；實際使用資格請透過連線測試確認。" };
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException)
+            {
+                antigravityCache = (antigravityCache ?? provider) with { ModelCatalogState = "Unavailable",
+                    ModelCatalogMessage = "無法讀取 agy 模型清單。請先完成登入後重新載入，或依 agy models 輸出填入自訂模型 ID。" };
+            }
+            antigravityCacheUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+            return antigravityCache;
+        }
+        finally { antigravityModelsLock.Release(); }
     }
 
     private async Task<CliModelOption[]> DiscoverCodexModelsAsync(CancellationToken ct, bool refresh)
@@ -126,7 +167,7 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
     public async Task<CliDiagnostic> InspectAsync(string provider, CancellationToken ct = default)
     {
         provider = AiSelection.Normalize(new(provider)).Provider;
-        if (!registry.List().Single(p => p.Id == provider).Installed)
+        if (!registry.List(includeLegacy: true).Single(p => p.Id == provider).Installed)
             return new(provider, false, null, "Unknown", "NotInstalled", "CLI 未安裝或路徑未設定。");
         var command = registry.Require(provider);
         var root = PrepareDirectory();
@@ -138,6 +179,8 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
             // Only accept version-like text; never expose arbitrary CLI diagnostics or credentials.
             var text = version.StandardOutput.Trim();
             var safeVersion = text.Length <= 100 && System.Text.RegularExpressions.Regex.IsMatch(text, @"\A[A-Za-z0-9 ._+()/-]+\z") ? text : null;
+            if (provider == "antigravity")
+                return new(provider, true, safeVersion, "Unknown", "Unchecked", "已找到 Antigravity CLI（agy）。請在官方終端完成登入後，按連線測試確認模型資格；版本檢查不呼叫模型。");
             if (provider == "gemini")
                 return new(provider, true, safeVersion, "Unknown", "Unchecked", "Gemini CLI 沒有統一的免額度登入狀態命令。請完成官方登入後，按連線測試確認；登入與執行是分開檢查。");
             var login = await process.RunAsync(command.Executable, [.. command.PrefixArguments, .. provider == "claude" ? new[] { "auth", "status" } : new[] { "login", "status" }], root, null, timeout.Token);
@@ -171,17 +214,18 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
         List<string> args = selection.Provider switch
         {
             "codex" => ["exec", "--sandbox", "read-only", "--json", "--ephemeral"],
+            "antigravity" => AntigravityCliRunner.Arguments(selection, planning: true),
             "claude" => ClaudeCliRunner.Arguments(selection, planning: true, probe: true),
             _ => ["--sandbox", "--approval-mode", "plan", "--output-format", "json", "--prompt", "Reply only DEVFLOW_OK. Do not use tools or modify files."]
         };
-        if (selection.Model != null && selection.Provider != "claude") args.AddRange(["--model", selection.Model]);
-        if (selection.Provider != "claude") CliReasoning.AddArguments(args, selection);
+        if (selection.Model != null && selection.Provider is not ("claude" or "antigravity")) args.AddRange(["--model", selection.Model]);
+        if (selection.Provider is not ("claude" or "antigravity")) CliReasoning.AddArguments(args, selection);
         if (selection.Provider == "codex") args.AddRange(["--skip-git-repo-check", "-C", root, "-"]);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(120));
         try
         {
             var result = await process.RunAsync(command.Executable, [.. command.PrefixArguments, .. args], root,
-                selection.Provider is "codex" or "claude" ? "Reply only DEVFLOW_OK. Do not use tools or modify files." : null, timeout.Token);
+                selection.Provider == "antigravity" ? AntigravityCliRunner.Input("Reply only DEVFLOW_OK. Do not use tools or modify files.") : selection.Provider is "codex" or "claude" ? "Reply only DEVFLOW_OK. Do not use tools or modify files." : null, timeout.Token);
             bool success = result.ExitCode == 0 && result.StandardOutput.Contains("DEVFLOW_OK", StringComparison.Ordinal);
             if (selection.Provider == "codex" && success)
             {
@@ -201,6 +245,11 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
                     success = success && answer && completed;
                 }
                 catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException) { success = false; }
+            }
+            if (selection.Provider == "antigravity" && success)
+            {
+                try { success = AntigravityCliRunner.ParseResult(result.StandardOutput).Trim() == "DEVFLOW_OK"; }
+                catch (InvalidOperationException) { success = false; }
             }
             if (selection.Provider == "gemini" && success)
             {

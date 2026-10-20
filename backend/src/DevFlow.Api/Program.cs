@@ -5,19 +5,33 @@ using DevFlow.Infrastructure;
 using DevFlow.Api;
 using DevFlow.Runners;
 
+if (args is ["--agy-permission-hook", var pipeName])
+{
+    await AntigravityPermissionHook.RunClientAsync(pipeName);
+    return;
+}
 var builder = WebApplication.CreateBuilder(args);
-if (builder.Configuration.GetValue<bool>("DevFlow:DesktopManaged"))
+var runtimePaths = RuntimePaths.Resolve(Environment.CurrentDirectory, AppContext.BaseDirectory,
+    builder.Configuration["DevFlow:DatabasePath"], builder.Configuration["DevFlow:ArtifactsRoot"], builder.Configuration["DevFlow:WorktreeRoot"], builder.Configuration["DevFlow:CliControlRoot"]);
+builder.Configuration["DevFlow:DatabasePath"] = runtimePaths.Database;
+builder.Configuration["DevFlow:ArtifactsRoot"] = runtimePaths.Artifacts;
+builder.Configuration["DevFlow:WorktreeRoot"] = runtimePaths.Worktrees;
+builder.Configuration["DevFlow:CliControlRoot"] = runtimePaths.CliControl;
+if (builder.Configuration.GetValue<bool>("DevFlow:DesktopManaged") || builder.Configuration.GetValue<bool>("DevFlow:LauncherManaged"))
     builder.Services.AddHostedService<DevFlow.Desktop.DesktopLifetime>();
 builder.WebHost.UseUrls(builder.Configuration["DevFlow:ApiUrl"] ?? "http://127.0.0.1:5180");
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
+builder.Services.AddSingleton<DiscussionOperations>();
 builder.Services.AddSingleton<IFolderPicker, WindowsFolderPicker>();
 builder.Services.AddSingleton(new CliRegistry(builder.Configuration["DevFlow:CodexExecutable"], builder.Configuration["DevFlow:GeminiExecutable"],
     builder.Configuration["DevFlow:NodeExecutable"],
     builder.Configuration.GetSection("DevFlow:Models:Codex").GetChildren().Select(c => c.Value!).ToArray(),
     builder.Configuration.GetSection("DevFlow:Models:Gemini").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Gemini").GetChildren().Select(c => c.Value!).ToArray() : null,
     builder.Configuration["DevFlow:ClaudeExecutable"],
-    builder.Configuration.GetSection("DevFlow:Models:Claude").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Claude").GetChildren().Select(c => c.Value!).ToArray() : null));
+    builder.Configuration.GetSection("DevFlow:Models:Claude").Exists() ? builder.Configuration.GetSection("DevFlow:Models:Claude").GetChildren().Select(c => c.Value!).ToArray() : null,
+    antigravity: builder.Configuration["DevFlow:AntigravityExecutable"],
+    antigravityModels: builder.Configuration.GetSection("DevFlow:Models:Antigravity").GetChildren().Select(c => c.Value!).ToArray()));
 var cliControl = Path.GetFullPath(builder.Configuration["DevFlow:CliControlRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "cli-control"));
 builder.Services.AddSingleton(new CliMaintenanceGate(cliControl));
 builder.Services.AddSingleton(sp => new CliDiagnostics(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), cliControl));
@@ -40,7 +54,8 @@ builder.Services.AddSingleton(sp => new CliMaintenance(sp.GetRequiredService<IPr
             (await store.ListDiscussionsAsync(ct)).Any(d => d.ActiveOperation is not null);
     }, cliControl, builder.Configuration["DevFlow:NodeExecutable"], builder.Configuration["DevFlow:NpmCliPath"], builder.Configuration["DevFlow:NpmGlobalRoot"]));
 var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
-builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts));
+builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts,
+    permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location));
 var collaborationWorktrees = Path.GetFullPath(builder.Configuration["DevFlow:WorktreeRoot"] ?? Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "DevFlow.Worktrees"));
 builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(sp.GetRequiredService<IProcessRunner>(),
     collaborationWorktrees));
@@ -72,6 +87,7 @@ app.Use(async (context, next) =>
     }
 });
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/api/worker/status", (SqliteTaskStore store, CancellationToken ct) => store.GetWorkerPresenceAsync(ct));
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? "";
@@ -96,6 +112,9 @@ app.MapPost("/api/projects", async (CreateProjectRequest input, ITaskStore store
 app.MapGet("/api/projects/{id:guid}", async (Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetProjectAsync(id, ct) is { } p ? Results.Ok(p) : Results.NotFound());
 app.MapGet("/api/tasks", (ITaskStore store, CancellationToken ct) => store.ListTasksAsync(ct));
+app.MapGet("/api/workflow-templates", (SqliteTaskStore store, CancellationToken ct) => store.ListWorkflowTemplatesAsync(ct));
+app.MapPost("/api/workflow-templates", async (WorkflowTemplate input, SqliteTaskStore store, CancellationToken ct) =>
+    Results.Ok(await store.SaveWorkflowTemplateAsync(input, ct)));
 app.MapPost("/api/tasks", async (CreateTaskRequest input, SqliteTaskStore store, CancellationToken ct) =>
 {
     var project = await store.GetProjectAsync(input.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
@@ -120,6 +139,21 @@ app.MapPost("/api/tasks", async (CreateTaskRequest input, SqliteTaskStore store,
     return Results.Created($"/api/tasks/{task.Id}", task);
 });
 app.MapGet("/api/tasks/{id:guid}", async (Guid id, ITaskStore store, CancellationToken ct) => Results.Ok(await Find(id, store, ct)));
+app.MapGet("/api/tasks/{id:guid}/permissions", async (Guid id, SqliteTaskStore store, CancellationToken ct) =>
+{
+    await Find(id, store, ct);
+    return Results.Ok(await store.ListToolApprovalsAsync(id, ct));
+});
+app.MapPost("/api/tasks/{id:guid}/permissions/{requestId:guid}", async (Guid id, Guid requestId, ToolApprovalReply input, HttpContext context, SqliteTaskStore store, CancellationToken ct) =>
+{
+    AiEndpoints.ExplicitAction(context);
+    await store.ReplyToolApprovalWithRuleAsync(id, requestId, input.OperationId, input.Allow, input.Rule, ct);
+    return Results.Ok(new { answered = true });
+});
+app.MapPut("/api/tasks/{id:guid}/workflow", async (Guid id, SetWorkflowRequest input, SqliteTaskStore store, CancellationToken ct) =>
+    Results.Ok(await store.SetWorkflowAsync(id, input.Workflow, input.ExpectedVersion, ct)));
+app.MapPost("/api/tasks/{id:guid}/workflow/continue", async (Guid id, ContinueWorkflowRequest input, SqliteTaskStore store, CancellationToken ct) =>
+    Results.Ok(await store.ContinueWorkflowAsync(id, input.ExpectedVersion, ct, input.Instructions)));
 app.MapPost("/api/tasks/{id:guid}/plan", async (Guid id, SetPlanRequest input, ITaskStore store, CancellationToken ct) =>
 {
     var task = await Find(id, store, ct);
@@ -145,6 +179,11 @@ app.MapPost("/api/tasks/{id:guid}/cancel", async (Guid id, ITaskStore store, Can
     await store.SaveTaskAsync(updated, task.Version, ct);
     return Results.Ok(updated);
 });
+app.MapPost("/api/tasks/{id:guid}/restart", async (Guid id, RestartTaskRequest input, HttpContext context, SqliteTaskStore store, CancellationToken ct) =>
+{
+    AiEndpoints.ExplicitAction(context);
+    return Results.Ok(await store.RestartCancelledAsync(id, input.ExpectedVersion, ct));
+});
 app.MapGet("/api/tasks/{id:guid}/runs", async (Guid id, ITaskStore store, CancellationToken ct) =>
 { await Find(id, store, ct); return Results.Ok(await store.ListRunsAsync(id, ct)); });
 app.MapGet("/api/tasks/{id:guid}/events", async (Guid id, long? after, ITaskStore store, CancellationToken ct) =>
@@ -159,6 +198,7 @@ app.MapPlanningArtifactEndpoints();
 app.MapAiEndpoints();
 app.MapCollaborationEndpoints();
 app.MapStorageEndpoints();
+app.MapToolPermissionEndpoints();
 app.Run();
 static async Task<WorkTask> Find(Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetTaskAsync(id, ct) ?? throw new MissingEntityException("Task not found.");

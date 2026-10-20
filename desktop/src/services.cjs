@@ -141,7 +141,7 @@ class Services extends EventEmitter {
 
 function taskNotifications(previous, tasks) {
   if (!previous) return []; // Seed existing history without notifying on launch.
-  const watched = new Set(['AwaitingApproval', 'AwaitingReview', 'Failed', 'PlanningFailed', 'Merged']);
+  const watched = new Set(['AwaitingApproval', 'AwaitingReview', 'AwaitingStepApproval', 'Failed', 'PlanningFailed', 'Merged']);
   return tasks.filter(task => previous.get(task.id) !== task.status && watched.has(task.status));
 }
 function isSameOrigin(url, origin) {

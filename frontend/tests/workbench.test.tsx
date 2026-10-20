@@ -2,6 +2,29 @@ import {it,expect,vi} from 'vitest';
 import {render,screen,fireEvent,waitFor,within,act} from '@testing-library/react';
 import App from '../src/App';
 async function ready(){await screen.findByText('API 已連線');}
+it('restarts a cancelled task with the current version and refreshes its frozen detail',async()=>{
+  const data=fixture();data.tasks[0].status='Cancelled';setup(data);await ready();await openTask(id1);
+  fireEvent.click(screen.getByRole('button',{name:'重新開始'}));
+  await waitFor(()=>expect(data.requests.some((r:any)=>r.path.endsWith('/restart')&&r.method==='POST')).toBe(true));
+  expect(data.requests.find((r:any)=>r.path.endsWith('/restart')).body).toEqual({expectedVersion:4});
+  await screen.findByText('規劃排隊');expect(screen.queryByRole('button',{name:'重新開始'})).toBeNull();
+});
+it('keeps polling a cancelled task until the old run stops before enabling restart',async()=>{
+  const data=fixture();data.tasks[0].status='Cancelled';data.run.finishedAt=null;setup(data);await ready();await openTask(id1);
+  expect(screen.getByRole('button',{name:'等待舊執行停止…'}).hasAttribute('disabled')).toBe(true);
+  data.run.finishedAt='2026-10-20T11:00:00Z';
+  await waitFor(()=>expect(screen.getByRole('button',{name:'重新開始'}).hasAttribute('disabled')).toBe(false),{timeout:6500});
+  expect(data.requests.every((r:any)=>r.method==='GET')).toBe(true);
+},10000);
+it('keeps task tool approval visible across tabs while planning and never auto-answers',async()=>{
+  const data=fixture();data.tasks[0].status='Planning';data.run.kind='Planning';data.run.finishedAt=null;
+  data.permissions=[{id:'request',operationId:rid,tool:'run_command',arguments:{CommandLine:'Get-ChildItem -Directory'},workspace:'D:/worktree',createdAt:'2026-10-20T10:00:00Z',expiresAt:'2026-10-20T10:02:00Z',state:'Pending'}];
+  setup(data);await ready();await openTask(id1);
+  await screen.findByRole('button',{name:'允許這一次'});
+  fireEvent.click(screen.getByRole('button',{name:'執行與證據'}));
+  expect(screen.getByRole('button',{name:'允許這一次'})).toBeTruthy();
+  expect(data.requests.every((r:any)=>r.method==='GET')).toBe(true);
+});
 it('keeps review input when polling returns a new task version',async()=>{const data=setup();await ready();await openTask(id1);fireEvent.click(screen.getByRole('button',{name:'成果審核'}));fireEvent.change(screen.getByLabelText('審核意見'),{target:{value:'Polling draft'}});data.tasks[0].version=5;await waitFor(()=>expect(screen.getByText('v5')).toBeTruthy(),{timeout:6500});expect((screen.getByLabelText('審核意見') as HTMLTextAreaElement).value).toBe('Polling draft');},10000);
 async function openTask(id:string){await act(async()=>{location.hash='#task/'+id;window.dispatchEvent(new HashChangeEvent('hashchange'));});await screen.findByRole('heading',{level:1,name:id===id1?'第一個任務':'第二個任務'});}
 it('loads without model calls and displays task text safely',async()=>{const data=fixture();data.tasks[0].title='<img src=x onerror=alert(1)>';setup(data);await ready();expect(screen.getAllByText(data.tasks[0].title).length).toBeGreaterThan(0);expect(document.querySelector('img')).toBeNull();expect(data.requests.every((r:any)=>r.method==='GET')).toBe(true);});
@@ -22,6 +45,8 @@ function setup(data=fixture()){
     else if(path==="/api/tasks"&&method==="GET")result=data.tasks;
     else if(path==="/api/tasks"&&method==="POST"){result={...body,id:"33333333-3333-4333-8333-333333333333",version:0,createdAt:"2026-10-14T11:00:00+08:00",status:"AwaitingPlan",ai:{planning:body.planning||data.projects[0].aiDefaults.planning,implementation:body.implementation||data.projects[0].aiDefaults.implementation}};data.tasks.push(result);}
     else if(/^\/api\/tasks\/[^/]+$/.test(path))result=task;
+    else if(path.endsWith('/restart')&&method==='POST'){task.status='PlanningQueued';task.version++;result=task;}
+    else if(path.endsWith("/permissions"))result=data.permissions||[];
     else if(path.endsWith("/runs"))result=task?.status==="AwaitingPlan"?[]:[data.run];
     else if(path.endsWith("/plans"))result=task?.plan?[{...task.plan,source:"Manual",createdAt:task.createdAt}]:[];
     else if(path.endsWith("/plan")&&method==="POST"){if(body.expectedVersion!==task.version){status=409;result={title:"Task changed"};}else{task.plan={...task.plan,text:body.text,revision:task.plan.revision+1};task.version++;result=task;}}

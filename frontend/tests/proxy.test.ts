@@ -8,7 +8,8 @@ it('forwards CLI actions through the actual Vite proxy without accepting foreign
   await new Promise<void>(resolve=>backend.listen(0,'127.0.0.1',resolve));
   const target=`http://127.0.0.1:${(backend.address() as AddressInfo).port}`,previous=process.env.DEVFLOW_API_URL;
   process.env.DEVFLOW_API_URL=target;
-  const vite=await createServer({server:{port:0,strictPort:false}});
+  // A test server must not replace the dependency cache of a running dev server.
+  const vite=await createServer({cacheDir:'node_modules/.vite-proxy-test',server:{port:0,strictPort:false}});
   try{
     await vite.listen();
     const port=(vite.httpServer!.address() as AddressInfo).port;

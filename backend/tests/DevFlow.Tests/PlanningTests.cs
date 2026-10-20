@@ -53,6 +53,21 @@ public sealed class PlanningTests : IAsyncLifetime
         }
         finally { cts.Cancel(); await running; }
     }
+    [Fact] public async Task Progress_only_reply_is_failed_not_published_and_historical_placeholder_cannot_be_approved()
+    {
+        await Store.QueuePlanningAsync(task.Id,task.Version);
+        await new PlanningCoordinator(Store,new ProgressPlanner(),new FakeWorkspace()).ExecuteNextAsync();
+        Assert.Equal(Status.PlanningFailed,(await Store.GetTaskAsync(task.Id))!.Status);
+        Assert.Empty(await Store.ListPlansAsync(task.Id));
+        var old=task.SetPlan("正在分析儲存庫與現有檔案，以擬定計畫。");
+        Assert.NotNull(old.Plan!.Problem);
+        Assert.Throws<ArgumentException>(()=>old.ApprovePlan());
+        Assert.Null(task.SetPlan("1. 修改出貨列表的表格樣式。\n2. 執行 npm run build 驗證。").Plan!.Problem);
+    }
+    private sealed class ProgressPlanner : IPlanningRunner
+    {
+        public Task<string> PlanAsync(WorkTask t,Workspace w,Guid id,CancellationToken ct)=>Task.FromResult("正在分析儲存庫與現有檔案，以擬定計畫。");
+    }
     [Fact] public async Task Generated_plan_waits_for_human_approval_and_preserves_revision()
     {
         await Store.QueuePlanningAsync(task.Id, task.Version);

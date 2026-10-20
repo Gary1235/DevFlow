@@ -21,12 +21,37 @@ public sealed record ExecutionPolicy(bool Tdd = true, string[]? AllowedPaths = n
         return policy with { AllowedPaths = paths };
     }
 }
-public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection[]? Reviewers = null, int MaxReviewRetries = 0)
+public sealed record WorkflowStep(Guid Id, string Name, string Kind = "Implementation", AiSelection? Selection = null,
+    string? Instructions = null, string[]? AllowedPaths = null, bool WaitForApproval = false, string? AcceptanceCriteria = null);
+public sealed record WorkflowTemplate(string Name, WorkflowDefinition Workflow);
+public sealed record WorkflowStepResult(Guid StepId, string Name, string Kind, string State, Guid RunId,
+    string? ResultCommit, string? Summary, AiSelection? Selection, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt = null);
+public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection[]? Reviewers = null, int MaxReviewRetries = 0,
+    WorkflowStep[]? Steps = null)
 {
     public static WorkflowDefinition Normalize(WorkflowDefinition? flow)
     {
         flow ??= new();
         if (flow.MaxReviewRetries is < 0 or > 2 || (flow.Reviewers?.Length ?? 0) > 2) throw new ArgumentException("At most two AI reviewers and two correction rounds are supported.");
+        if (flow.Steps is { } steps)
+        {
+            if (steps.Length is < 1 or > 20 || !steps.Any(s => s?.Kind == "Implementation"))
+                throw new ArgumentException("流程需有 1 至 20 個步驟，並至少包含一個實作步驟。");
+            if (steps.Any(s => s is null || s.Id == Guid.Empty) || steps.Select(s => s.Id).Distinct().Count() != steps.Length)
+                throw new ArgumentException("流程步驟 ID 必須唯一且非空。");
+            if (flow.MaxReviewRetries != 0) throw new ArgumentException("自訂流程失敗後請手動檢查並重試，不支援自動修正輪次。");
+            steps = steps.Select(s =>
+            {
+                if (s.Kind is not ("Implementation" or "Review" or "Validation" or "Approval"))
+                    throw new ArgumentException("不支援的流程步驟類型。");
+                return s with { Name = WorkTask.Required(s.Name, 100),
+                    AcceptanceCriteria = string.IsNullOrWhiteSpace(s.AcceptanceCriteria) ? null : WorkTask.Required(s.AcceptanceCriteria, 12000),
+                    Instructions = string.IsNullOrWhiteSpace(s.Instructions) ? null : WorkTask.Required(s.Instructions, 12000),
+                    Selection = s.Kind is "Implementation" or "Review" ? AiSelection.Normalize(s.Selection) : null,
+                    AllowedPaths = ExecutionPolicy.Normalize(new(false, s.AllowedPaths), []).AllowedPaths };
+            }).ToArray();
+            return flow with { Steps = steps, Reviewers = [] };
+        }
         return flow with { Reviewers = (flow.Reviewers ?? []).Select(AiSelection.Normalize).ToArray() };
     }
 }
@@ -36,7 +61,7 @@ public sealed record DiscussionDraft(Guid Id, string Title, string Description, 
     string[]? AllowedPaths = null, Guid[]? RuleIds = null, string[]? OpenQuestions = null, Guid? CreatedTaskId = null, int SourceVersion = 0);
 public sealed record Discussion(Guid Id, Guid ProjectId, string Title, AiSelection Selection, RuleSnapshot[] Rules,
     DiscussionMessage[] Messages, DiscussionDraft[] Drafts, int Version, DateTimeOffset UpdatedAt,
-    Guid? ActiveOperation = null, string? Error = null);
+    Guid? ActiveOperation = null, string? Error = null, bool AutoTitle = false, Guid? LastOperationId = null);
 
 public static class TaskInstructions
 {

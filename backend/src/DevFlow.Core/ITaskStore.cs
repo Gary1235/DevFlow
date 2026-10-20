@@ -9,6 +9,8 @@ public interface ITaskStore
     Task<IReadOnlyList<ProjectDefinition>> ListProjectsAsync(CancellationToken ct = default);
     Task AddTaskAsync(WorkTask task, CancellationToken ct = default);
     Task<WorkTask?> GetTaskAsync(Guid id, CancellationToken ct = default);
+    async Task<TaskStatus?> GetTaskStatusAsync(Guid id, CancellationToken cancellationToken = default) =>
+        (await GetTaskAsync(id, cancellationToken))?.Status;
     Task<IReadOnlyList<WorkTask>> ListTasksAsync(CancellationToken ct = default);
     Task SaveTaskAsync(WorkTask task, int expectedVersion, CancellationToken ct = default);
     Task<TaskClaim?> ClaimNextAsync(CancellationToken ct = default);
@@ -17,11 +19,12 @@ public interface ITaskStore
     Task<IReadOnlyList<TaskEvent>> GetEventsAsync(Guid taskId, long after = 0, CancellationToken ct = default);
     Task AppendEventAsync(Guid taskId, string kind, string message, CancellationToken ct = default);
     Task SetWorkspaceAsync(Guid runId, Workspace workspace, CancellationToken ct = default);
+    Task SetRunActivityAsync(Guid runId, RuntimeSnapshot activity, CancellationToken ct = default);
     Task<TaskRun?> GetRunAsync(Guid runId, CancellationToken ct = default);
     Task<TaskReview> ReviewAsync(Guid taskId, Guid runId, string resultCommit, ReviewDecision decision,
         string? comments, int expectedVersion, CancellationToken ct = default);
     Task<IReadOnlyList<TaskReview>> ListReviewsAsync(Guid taskId, CancellationToken ct = default);
-    Task<WorkTask> RetryAsync(Guid taskId, string? instructions, int expectedVersion, CancellationToken ct = default);
+    Task<WorkTask> RetryAsync(Guid taskId, string? instructions, int expectedVersion, CancellationToken ct = default, string scope = "Resume");
     Task<TaskMerge> BeginMergeAsync(Guid taskId, Guid runId, string resultCommit, string expectedTargetCommit,
         int expectedVersion, CancellationToken ct = default);
     Task<TaskMerge> FinishMergeAsync(Guid mergeId, MergeState state, string? mergedCommit, string? error, CancellationToken ct = default);
@@ -31,4 +34,7 @@ public interface ITaskStore
     Task CompletePlanningAsync(Guid runId, string? plan, string? error, CancellationToken ct = default);
     Task<IReadOnlyList<PlanRevision>> ListPlansAsync(Guid taskId, CancellationToken ct = default);
     Task RecordAiReviewAsync(Guid runId, AiAcceptanceReport report, CancellationToken ct = default);
+    Task RecordWorkflowStepAsync(Guid runId, WorkflowStepResult result, CancellationToken ct = default);
+    Task<WorkTask> BeginWorkflowStepAsync(Guid runId, CancellationToken ct = default);
+    Task PauseWorkflowAsync(Guid runId, CancellationToken ct = default);
 }

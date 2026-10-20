@@ -34,9 +34,18 @@ public sealed class RunArtifactReader(string root) : IRunArtifactReader
     public async Task<IReadOnlyList<ValidationSummary>> ValidationsAsync(Guid runId, CancellationToken ct = default)
     {
         var results = new List<ValidationSummary>();
+        var runRoot = RunRoot(runId);
+        var scopes = new List<string> { "" };
+        if (Directory.Exists(runRoot))
+        {
+            CheckLinks(runRoot);
+            scopes.AddRange(Directory.EnumerateDirectories(runRoot, "Step-*").Select(Path.GetFileName).OfType<string>()
+                .Where(name => Guid.TryParseExact(name[5..], "N", out _)).OrderBy(name => name));
+        }
+        foreach (var scope in scopes)
         foreach (var phase in Enum.GetValues<TddPhase>())
         {
-            var relative = $"{phase}/evidence.json";
+            var relative = (scope.Length == 0 ? "" : scope + "/") + $"{phase}/evidence.json";
             string path;
             try { path = Resolve(runId, relative); }
             catch (MissingEntityException) { continue; }
@@ -47,7 +56,8 @@ public sealed class RunArtifactReader(string root) : IRunArtifactReader
                 var total = json.GetProperty("Total").GetInt32();
                 var failed = json.GetProperty("Failed").GetInt32();
                 if (total < 0 || failed < 0 || failed > total) throw new ConflictException("Invalid validation counters.");
-                results.Add(new(phase, json.GetProperty("ExitCode").GetInt32(), total, failed, relative));
+                results.Add(new(phase, json.GetProperty("ExitCode").GetInt32(), total, failed, relative,
+                    scope.Length == 0 ? null : Guid.ParseExact(scope[5..], "N")));
             }
             catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
             { throw new ConflictException("Validation evidence is incomplete or malformed; retry after the phase finishes."); }

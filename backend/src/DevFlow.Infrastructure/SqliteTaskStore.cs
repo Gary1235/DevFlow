@@ -5,7 +5,7 @@ using Status = DevFlow.Core.TaskStatus;
 namespace DevFlow.Infrastructure;
 
 // Mutations and events commit together; BEGIN IMMEDIATE serializes queue claims.
-public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
+public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, ITaskToolApprovalStore
 {
     private readonly string path = Path.GetFullPath(databasePath);
     public string DatabasePath => path;
@@ -52,6 +52,12 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
                 Revision INTEGER NOT NULL, Payload TEXT NOT NULL, UNIQUE(TaskId,Revision));
             CREATE TABLE IF NOT EXISTS RuleLibrary(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS Discussions(Id TEXT PRIMARY KEY, ProjectId TEXT NOT NULL REFERENCES Projects(Id), Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS WorkflowTemplates(Name TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS WorkerPresence(Id INTEGER PRIMARY KEY CHECK(Id=1), Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ToolApprovals(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
+                RunId TEXT NOT NULL REFERENCES Runs(Id), Payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_ToolApprovals_Task ON ToolApprovals(TaskId);
+            CREATE TABLE IF NOT EXISTS ToolPermissionRules(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             """);
         var tdd = new RuleDefinition(Guid.Parse("90d978ec-8485-4e0c-a90d-31a333881955"), "TDD 模式",
             "依序執行 Baseline、Red、Green、Refactor；保留既有測試，不得刪除、略過或弱化斷言。Red 必須有實際失敗測試，後續階段必須通過。",
@@ -86,6 +92,13 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
     }
     public Task<WorkTask?> GetTaskAsync(Guid id, CancellationToken ct = default)
     { using var c = Open(ct); return Task.FromResult(ReadOne<WorkTask>(c, null, "Tasks", id)); }
+    public Task<Status?> GetTaskStatusAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        using var connection = Open(cancellationToken);
+        using var command = Command(connection, null, "SELECT Status FROM Tasks WHERE Id=$id", ("$id", id.ToString()));
+        var scalarValue = command.ExecuteScalar();
+        return Task.FromResult<Status?>(scalarValue is null or DBNull ? null : (Status)Convert.ToInt32(scalarValue));
+    }
     public Task<IReadOnlyList<WorkTask>> ListTasksAsync(CancellationToken ct = default)
     { using var c = Open(ct); return Task.FromResult(ReadList<WorkTask>(c, "SELECT Payload FROM Tasks ORDER BY CreatedAt,Id")); }
     public Task SaveTaskAsync(WorkTask t, int expectedVersion, CancellationToken ct = default)
@@ -129,6 +142,10 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
         if (run.FinishedAt is not null) throw new ConflictException("Run already finished.");
         var task = ReadOne<WorkTask>(c, tx, "Tasks", run.TaskId)!;
         var status = task.Status == Status.Cancelled ? Status.Cancelled : success ? Status.AwaitingReview : Status.Failed;
+        // A pending-step edit may append work while the executor finishes its last snapshot.
+        // Reserve the continuation in this transaction rather than silently skipping new steps.
+        if (success && status == Status.AwaitingReview && task.Workflow?.Steps is { } steps && (task.StepResults?.Length ?? 0) < steps.Length)
+            status = Status.Queued;
         var lastReview = run.AiReviews?.LastOrDefault();
         var correction = status == Status.AwaitingReview && lastReview?.Verdict == "NeedsChanges" && task.AutoReviewAttempt < (task.Workflow?.MaxReviewRetries ?? 0);
         var finished = run with { Status = correction ? "AiChangesRequested" : status.ToString(), WorktreePath = worktree, BaseCommit = baseCommit,
@@ -136,7 +153,7 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore
         Execute(c, tx, "UPDATE Runs SET Payload=$payload WHERE Id=$id", ("$payload", JsonSerializer.Serialize(finished)), ("$id", runId.ToString()));
         if (task.Status != Status.Cancelled)
         {
-            var updated = task with { Status = status, Version = task.Version + 1 };
+            var updated = task with { Status = status, Version = task.Version + 1, ActiveStepId = null };
             if (correction) updated = updated with { Status = Status.Queued, AutoReviewAttempt = task.AutoReviewAttempt + 1,
                 RevisionCommit = resultCommit, RevisionInstructions = "AI acceptance correction:\n" + lastReview!.Summary };
             UpdateTask(c, tx, updated, task.Version);

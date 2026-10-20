@@ -37,4 +37,18 @@ public sealed class GitWorkspaceManager(IProcessRunner process, string root) : I
         if (head != workspace.BaseCommit || !string.IsNullOrWhiteSpace(status))
             throw new ConflictException("Planning changed the worktree or commit.");
     }
+    public async Task CleanupReadOnlyAsync(ProjectDefinition project, Workspace workspace, Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var repository = Path.GetFullPath(project.RepositoryPath);
+            if (Directory.Exists(workspace.Path))
+                await process.RunAsync("git", ["worktree", "remove", "--", workspace.Path], repository, null, cancellationToken);
+            await process.RunAsync("git", ["branch", "-D", "devflow/" + runId.ToString("N")], repository, null, cancellationToken);
+        }
+        catch
+        {
+            // Retain worktree if git cleanup fails so StorageManager or human inspection can handle it.
+        }
+    }
 }

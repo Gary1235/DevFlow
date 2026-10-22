@@ -34,7 +34,7 @@ builder.Services.AddSingleton(new CliRegistry(builder.Configuration["DevFlow:Cod
     antigravityModels: builder.Configuration.GetSection("DevFlow:Models:Antigravity").GetChildren().Select(c => c.Value!).ToArray()));
 var cliControl = Path.GetFullPath(builder.Configuration["DevFlow:CliControlRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "cli-control"));
 builder.Services.AddSingleton(new CliMaintenanceGate(cliControl));
-builder.Services.AddSingleton(sp => new CliDiagnostics(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), cliControl));
+builder.Services.AddSingleton(sp => new CliDiagnostics(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), cliControl, sp.GetRequiredService<SqliteTaskStore>()));
 builder.Services.AddSingleton<ILoginTerminalLauncher, WindowsLoginTerminalLauncher>();
 builder.Services.AddSingleton(sp => new CliLoginManager(sp.GetRequiredService<CliRegistry>(), sp.GetRequiredService<ILoginTerminalLauncher>(), cliControl));
 builder.Services.AddSingleton<IResultDiffReader, GitResultDiffReader>();
@@ -55,11 +55,14 @@ builder.Services.AddSingleton(sp => new CliMaintenance(sp.GetRequiredService<IPr
     }, cliControl, builder.Configuration["DevFlow:NodeExecutable"], builder.Configuration["DevFlow:NpmCliPath"], builder.Configuration["DevFlow:NpmGlobalRoot"]));
 var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
 builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts,
-    permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location));
+    permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location, verifications: sp.GetRequiredService<SqliteTaskStore>()));
 var collaborationWorktrees = Path.GetFullPath(builder.Configuration["DevFlow:WorktreeRoot"] ?? Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "DevFlow.Worktrees"));
 builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(sp.GetRequiredService<IProcessRunner>(),
     collaborationWorktrees));
-builder.Services.AddSingleton(sp => new StorageManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts, collaborationWorktrees));
+builder.Services.AddSingleton(sp => new TaskPreviewManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationWorktrees));
+builder.Services.AddHostedService<PreviewLifetime>();
+builder.Services.AddSingleton(sp => new StorageManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts, collaborationWorktrees,
+    activePreview: sp.GetRequiredService<TaskPreviewManager>().HasActiveRun));
 var app = builder.Build();
 // Desktop sessions have a fresh secret injected by Electron, never exposed to React.
 var desktopToken = builder.Configuration["DevFlow:DesktopToken"];
@@ -151,7 +154,7 @@ app.MapPost("/api/tasks/{id:guid}/permissions/{requestId:guid}", async (Guid id,
     return Results.Ok(new { answered = true });
 });
 app.MapPut("/api/tasks/{id:guid}/workflow", async (Guid id, SetWorkflowRequest input, SqliteTaskStore store, CancellationToken ct) =>
-    Results.Ok(await store.SetWorkflowAsync(id, input.Workflow, input.ExpectedVersion, ct)));
+    Results.Ok(await store.SetWorkflowAsync(id, input.Workflow, input.ExpectedVersion, ct, input.PlanningSelection)));
 app.MapPost("/api/tasks/{id:guid}/workflow/continue", async (Guid id, ContinueWorkflowRequest input, SqliteTaskStore store, CancellationToken ct) =>
     Results.Ok(await store.ContinueWorkflowAsync(id, input.ExpectedVersion, ct, input.Instructions)));
 app.MapPost("/api/tasks/{id:guid}/plan", async (Guid id, SetPlanRequest input, ITaskStore store, CancellationToken ct) =>
@@ -198,6 +201,8 @@ app.MapPlanningArtifactEndpoints();
 app.MapAiEndpoints();
 app.MapCollaborationEndpoints();
 app.MapStorageEndpoints();
+app.MapExecutionSettingsEndpoints();
+app.MapPreviewEndpoints();
 app.MapToolPermissionEndpoints();
 app.Run();
 static async Task<WorkTask> Find(Guid id, ITaskStore store, CancellationToken ct) =>

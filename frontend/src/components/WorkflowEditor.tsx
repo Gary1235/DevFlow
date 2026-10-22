@@ -3,7 +3,7 @@ import { api } from '../api';
 import { useResource } from '../hooks';
 import { AiChoice, useNotice } from './ui';
 import { selectionText } from '../domain';
-import type { Provider, Selection, Workflow, WorkflowStep, WorkflowStepKind } from '../types';
+import type { Provider, Selection, Workflow, WorkflowStep, WorkflowStepKind, ValidationProfile } from '../types';
 
 export const stepKinds: Record<WorkflowStepKind, string> = {
   Implementation: '實作',
@@ -81,6 +81,7 @@ export function WorkflowEditor({
   lockedCount = 0,
   planningLocked = false,
   initialSelectedId,
+  validationProfiles = [],
 }: {
   value: Workflow;
   onChange: (flow: Workflow) => void;
@@ -88,6 +89,7 @@ export function WorkflowEditor({
   lockedCount?: number;
   planningLocked?: boolean;
   initialSelectedId?: string;
+  validationProfiles?: ValidationProfile[];
 }) {
   const steps = value.steps || [];
   const [selectedStepId, setSelectedStepId] = useState(initialSelectedId || steps[0]?.id || '');
@@ -379,9 +381,10 @@ export function WorkflowEditor({
 
                 {activeStep.kind === 'Validation' && (
                   <p className="info-banner">
-                    由系統執行專案的 dotnet test 設定，不呼叫模型。
+                    由系統執行下方選定的驗證設定，不呼叫模型。建置通過與測試通過會分別標示。
                   </p>
                 )}
+                {(activeStep.kind === 'Implementation' || activeStep.kind === 'Validation') && <label>此步驟的驗證設定<select aria-label="此步驟的驗證設定" value={activeStep.validationProfileId||''} onChange={e=>patchActiveStep({validationProfileId:e.target.value||null})}><option value="">沿用專案預設驗證</option>{activeStep.validationProfileId&&!validationProfiles.some(p=>p.id===activeStep.validationProfileId)&&<option value={activeStep.validationProfileId}>已保存的設定（請確認專案設定仍存在）</option>}{validationProfiles.map(p=><option value={p.id} key={p.id}>{p.name} · {p.workingDirectory} · {p.executable} {p.arguments.join(' ')}</option>)}</select><span className="footnote">實作步驟會在修改前後使用此設定。請先至「專案設定」建立前端／後端驗證。</span></label>}
 
                 <label>
                   這一步要做什麼（選填，留空則由規劃 AI 依整體計畫指揮）

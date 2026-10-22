@@ -3,10 +3,11 @@ import { api } from '../api';
 import { useAction, useResource } from '../hooks';
 import { Empty, Heading, Modal, useNotice } from './ui';
 import { providerNames } from '../domain';
+import { AutomationPolicy } from './AutomationPolicy';
 import type { Project, WorkTask } from '../types';
 
 interface PermissionRule { id:string;projectId:string;taskId:string|null;discussionId?:string|null;provider?:string;tool:string;kind:string;pattern:string;enabled:boolean;version:number }
-export const permissionToolNames:Record<string,string>={general_read:'一般讀取',run_command:'執行指令',read_file:'讀取檔案',write_file:'修改檔案',list_dir:'列出目錄',grep_search:'搜尋內容',find_by_name:'搜尋檔名',view_file:'讀取檔案'};
+export const permissionToolNames:Record<string,string>={general_read:'一般讀取',run_command:'執行指令',read_file:'讀取檔案',write_file:'修改檔案',edit_file:'修改檔案',list_dir:'列出目錄',grep_search:'搜尋內容',find_by_name:'搜尋檔名',view_file:'讀取檔案'};
 function RuleEditor({rule,projects,tasks,onClose,onSaved}:{rule:Partial<PermissionRule>;projects:Project[];tasks:WorkTask[];onClose:()=>void;onSaved:()=>void}) {
   const initialProject=rule.projectId||projects[0]?.id||'';
   const [draft,setDraft]=useState({projectId:initialProject,taskId:rule.taskId||tasks.find(t=>t.projectId===initialProject)?.id||'',discussionId:rule.discussionId||null,provider:rule.provider||'*',enabled:rule.enabled??true});
@@ -36,11 +37,13 @@ export function PermissionSettings({projects,tasks,projectId=''}:{projects:Proje
   const resource=useResource('permission-rules',load);const [editing,setEditing]=useState<Partial<PermissionRule>|null>(null);
   const notice=useNotice();const action=useAction(notice);
   const rules=(resource.data||[]).filter(r=>!projectId||r.projectId===projectId);
-  return <><Heading eyebrow="TOOL PERMISSIONS" title="工具權限設定" description="所有 CLI 共用分類與規則：一般讀取可在本次任務或對話批次允許，敏感操作逐次確認。">
+  return <><Heading eyebrow="TOOL PERMISSIONS" title="工具權限設定" description="指定工作副本內檔案預設允許；指令、連線與固定邊界保留確認，各 CLI 共用 DevFlow 政策。">
     <button className="primary" disabled={!projects.length} onClick={()=>setEditing({projectId:projectId||projects[0]?.id})}>新增允許規則</button>
   </Heading>
-    <div className="permission-policy-legend"><p className="permission-policy general-policy">✓ 一般：專案程式碼、一般文件、目錄與檔名查詢。</p><p className="permission-policy sensitive-policy">⚠ 敏感：機敏資料、資料庫、專案外讀取、所有寫入及未知指令。只能單次確認。</p><p className="permission-policy danger-policy">⛔ 刪除／高影響：刪除檔案或資料，逐次確認並檢視影響。</p></div>
-    <p className="info-banner">僅支援本次任務／對話的一般讀取授權。舊規則無法放行敏感操作；舊專案永久規則不再生效。停用規則只影響後續請求。</p>
+    <AutomationPolicy/>
+    <h2>手動確認模式的一般讀取規則</h2>
+    <div className="permission-policy-legend"><p className="permission-policy general-policy">✓ 綠色：依自動化政策或手動核准放行的一般操作。</p><p className="permission-policy sensitive-policy">⚠ 橘色：命中指令、連線限制或固定邊界，需單次確認。</p><p className="permission-policy danger-policy">⛔ 紅色：需確認的刪除／高影響操作。</p></div>
+    <p className="info-banner">下列舊一般讀取規則只在關閉自動化政策時使用，不會覆蓋自動化模式的指令、連線限制與固定邊界。</p>
     <p className="footnote">此分類適用 CLI 提交給 DevFlow 的工具確認；CLI 原生政策直接執行的操作不會由此頁攔截。機敏檔名與檔案類型採保守判斷，無法自動識別程式碼內硬編碼的秘密。</p>
     {resource.error&&<p role="alert" className="error-banner">{resource.error}<button onClick={resource.refresh}>重新讀取</button></p>}
     {resource.data&&!rules.length&&<Empty title="尚無允許規則" description="可在一般讀取確認卡允許本次任務／對話的一般讀取，也能在這裡新增任務規則。"/>}

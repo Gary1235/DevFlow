@@ -82,3 +82,33 @@ it('requires explicit confirmation before continuing a paused workflow',async()=
   expect(requests[0].path).toBe('/api/tasks/task/workflow/continue');
   expect(JSON.parse(requests[0].options.body)).toEqual({expectedVersion:8});
 });
+
+it.each(['Cancelled','Queued','PlanningQueued','Planning'])('edits an existing %s task model without starting work',async status=>{
+  const flow=workflowTemplate(),requests:{path:string;method:string;body:any}[]=[],changed=vi.fn();
+  vi.stubGlobal('fetch',async(path:string,options:RequestInit={})=>{
+    requests.push({path,method:options.method||'GET',body:options.body?JSON.parse(String(options.body)):null});
+    return new Response(JSON.stringify(path==='/api/ai/providers'?providers:path==='/api/workflow-templates'?[]:{}));
+  });
+  const task:WorkTask={id:'task',projectId:'project',title:'API',description:'Build',acceptanceCriteria:'Tests',plan:null,ai:null,createdAt:'2026-10-19T00:00:00Z',status,version:8,workflow:flow,stepResults:[]};
+  render(<NoticeProvider><WorkflowPanel task={task} onChanged={changed}/></NoticeProvider>);
+  fireEvent.click(screen.getByRole('button',{name:'更換模型：前端實作'}));
+  await waitFor(()=>expect(within(screen.getByLabelText('前端實作 AI')).getByRole('option',{name:'Claude Code'})).toBeTruthy());
+  fireEvent.change(screen.getByLabelText('前端實作 AI'),{target:{value:'claude'}});
+  fireEvent.change(screen.getByLabelText('前端實作模型'),{target:{value:'model-two'}});
+  fireEvent.click(screen.getByRole('button',{name:'儲存流程'}));
+  await waitFor(()=>expect(changed).toHaveBeenCalledOnce());
+  const mutations=requests.filter(r=>r.method!=='GET');
+  expect(mutations).toHaveLength(1);
+  expect(mutations[0]).toMatchObject({path:'/api/tasks/task/workflow',method:'PUT',body:{expectedVersion:8}});
+  expect(mutations[0].body.workflow.steps[1].selection).toMatchObject({provider:'claude',model:'model-two'});
+  expect(mutations[0].body.workflow.steps[0]).toEqual(flow.steps![0]);
+});
+
+it('offers model changes only for pending AI steps while running',()=>{
+  const flow=workflowTemplate();
+  const task:WorkTask={id:'task',projectId:'project',title:'API',description:'Build',acceptanceCriteria:'Tests',plan:null,ai:null,createdAt:'2026-10-19T00:00:00Z',status:'Running',version:8,workflow:flow,stepResults:[],activeStepId:flow.steps![0].id};
+  render(<NoticeProvider><WorkflowPanel task={task} onChanged={vi.fn()}/></NoticeProvider>);
+  expect(screen.queryByRole('button',{name:'更換模型：後端 API'})).toBeNull();
+  expect(screen.getByRole('button',{name:'更換模型：前端實作'})).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'更換模型：整合測試'})).toBeNull();
+});

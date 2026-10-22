@@ -48,6 +48,8 @@ public sealed class PermissionHookTests : IAsyncLifetime
         await using (await AntigravityPermissionHook.CreateAsync(operation, root, audit, default))
         {
             Assert.DoesNotContain("dangerously-skip-permissions", Command());
+            using(var settings=JsonDocument.Parse(await File.ReadAllTextAsync(path)))
+                Assert.False(settings.RootElement.EnumerateObject().Single(p=>p.Name.StartsWith("devflow-web-approval-")).Value.GetProperty("PreToolUse")[0].GetProperty("hooks")[0].TryGetProperty("timeout",out _));
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var first = Client(Payload(), timeout.Token); var pending = await Pending(operation);
             Assert.False(first.IsCompleted); Assert.Equal("run_command", pending.Tool);
@@ -83,6 +85,8 @@ public sealed class PermissionHookTests : IAsyncLifetime
             Assert.Equal("auto_approve", read.RootElement.GetProperty("decision").GetString());
             using var write = JsonDocument.Parse((await Client(Payload("write_to_file", new { TargetFile = Path.Combine(root, "file.txt") }), timeout.Token)).StandardOutput);
             Assert.Equal("deny", write.RootElement.GetProperty("decision").GetString());
+            using var edit = JsonDocument.Parse((await Client(Payload("edit_file", new { Path = Path.Combine(root, "file.txt"), Target = "old", Replacement = "new" }), timeout.Token)).StandardOutput);
+            Assert.Equal("deny", edit.RootElement.GetProperty("decision").GetString());
             using var wrong = JsonDocument.Parse((await Client(Payload(workspace: Path.GetTempPath()), timeout.Token)).StandardOutput);
             Assert.Equal("deny", wrong.RootElement.GetProperty("decision").GetString());
             Assert.Single(operation.Permissions);
@@ -90,6 +94,27 @@ public sealed class PermissionHookTests : IAsyncLifetime
         Assert.False(Directory.Exists(Path.Combine(root, ".agents")));
     }
 
+    [Theory]
+    [InlineData("Select-String -Pattern 'please delete file' -Path src/a.json -Culture en-US")]
+    [InlineData("Select-String -Path (Get-ChildItem -Path src -Recurse -Include *.json).FullName -Pattern 'please delete file' -List | Select-Object -First 30 Path,LineNumber,Line")]
+    public async Task Readonly_hook_uses_shared_operation_semantics_instead_of_keywords_in_search_text(string command)
+    {
+        if(!OperatingSystem.IsWindows())return;
+        Directory.CreateDirectory(Path.Combine(root,"src"));File.WriteAllText(Path.Combine(root,"src","a.json"),"{}");
+        var store=new SqliteTaskStore(Path.Combine(root,"tasks.db"));await store.InitializeAsync();
+        var project=new ProjectDefinition(Guid.NewGuid(),"Test",root,"main",["test"]);await store.AddProjectAsync(project);
+        var discussion=new Discussion(Guid.NewGuid(),project.Id,"Test",new("antigravity"),[],[],[],0,DateTimeOffset.UtcNow);await store.AddDiscussionAsync(discussion,default);
+        using var operation=new DiscussionOperations.Operation(Guid.NewGuid(),new("antigravity"),default);
+        operation.ConfigurePermissions(store,project.Id,discussion.Id);
+        await using(await AntigravityPermissionHook.CreateAsync(operation,root,Path.Combine(root,"audit.jsonl"),default)) {
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var result=await Client(Payload(args:new{CommandLine=command}),timeout.Token);
+            using var response=JsonDocument.Parse(result.StandardOutput);
+            Assert.Equal("auto_approve",response.RootElement.GetProperty("decision").GetString());
+            var request=Assert.Single(operation.Permissions);Assert.Equal("AllowedByPolicy",request.State);
+            Assert.Equal("powershell",request.Arguments.GetProperty("Shell").GetString());
+        }
+    }
     [Fact] public async Task Stopping_or_disposing_an_operation_never_implies_approval()
     {
         var operation = new DiscussionOperations.Operation(Guid.NewGuid(), new("antigravity"), default);
@@ -104,6 +129,21 @@ public sealed class PermissionHookTests : IAsyncLifetime
         second.Dispose(); Assert.False(await other);
     }
 
+    [Fact] public async Task Native_hook_client_disconnect_invalidates_the_web_request_without_stopping_the_whole_operation()
+    {
+        using var operation=new DiscussionOperations.Operation(Guid.NewGuid(),new("antigravity"),default);
+        await using(await AntigravityPermissionHook.CreateAsync(operation,root,Path.Combine(root,"audit.jsonl"),default))
+        {
+            using var clientLifetime=new CancellationTokenSource();
+            var client=Client(Payload(),clientLifetime.Token);var request=await Pending(operation);
+            Assert.Null(request.ExpiresAt);clientLifetime.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(()=>client);
+            for(var i=0;i<300&&operation.Permissions.Single().State=="Pending";i++)await Task.Delay(20);
+            Assert.False(operation.Token.IsCancellationRequested);Assert.Equal("Expired",operation.Permissions.Single().State);
+            Assert.Contains("CliInterrupted",operation.Failure);
+            Assert.Throws<ConflictException>(()=>operation.ReplyPermission(request.Id,true));
+        }
+    }
     [Fact] public async Task Stopping_a_waiting_native_hook_returns_deny_and_removes_the_temporary_hook()
     {
         using var operation = new DiscussionOperations.Operation(Guid.NewGuid(), new("antigravity"), default);

@@ -2,9 +2,22 @@ using DevFlow.Core;
 using System.Diagnostics;
 namespace DevFlow.Runners;
 public sealed record CliDiagnostic(string Provider, bool Installed, string? Version, string LoginState, string ExecutionState, string Message,
-    string? ErrorCode = null, int? ExitCode = null);
-public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry, string controlRoot)
+    string? ErrorCode = null, int? ExitCode = null, DateTimeOffset? LastVerifiedAt = null, string? VerifiedModel = null,
+    string? VerificationSource = null, DateTimeOffset? VerificationObservedAt = null);
+public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry, string controlRoot, ICliVerificationStore? verifications = null)
 {
+    private async Task<CliDiagnostic> WithVerificationAsync(CliDiagnostic diagnostic, CliCommand command, CancellationToken ct)
+    {
+        if (verifications is null) return diagnostic;
+        var evidence = await verifications.GetCliVerificationAsync(diagnostic.Provider, ct);
+        if (evidence is null || evidence.CommandIdentity != CliVerificationEvidence.Identity(command)) return diagnostic;
+        if (!evidence.Successful) return diagnostic.LoginState == "Unknown" ? diagnostic with {
+            LoginState = "LoggedOut", Message = "最近一次 CLI 呼叫回報驗證失敗，請重新登入後再確認。", VerificationObservedAt = evidence.ObservedAt
+        } : diagnostic;
+        return diagnostic with { LoginState = diagnostic.LoginState == "Unknown" ? "VerifiedByExecution" : diagnostic.LoginState,
+            LastVerifiedAt = evidence.ObservedAt, VerifiedModel = evidence.Model, VerificationSource = evidence.Source, VerificationObservedAt = evidence.ObservedAt,
+            Message = diagnostic.LoginState == "Unknown" ? "最近一次模型呼叫成功，驗證可用；這是歷史執行結果，不代表登入永久有效或所有模型皆可使用。" : diagnostic.Message };
+    }
     private readonly SemaphoreSlim modelListLock = new(1, 1);
     private CliModelOption[]? codexModelCache;
     private DateTimeOffset codexModelCacheUntil;
@@ -180,9 +193,9 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
             var text = version.StandardOutput.Trim();
             var safeVersion = text.Length <= 100 && System.Text.RegularExpressions.Regex.IsMatch(text, @"\A[A-Za-z0-9 ._+()/-]+\z") ? text : null;
             if (provider == "antigravity")
-                return new(provider, true, safeVersion, "Unknown", "Unchecked", "已找到 Antigravity CLI（agy）。請在官方終端完成登入後，按連線測試確認模型資格；版本檢查不呼叫模型。");
+                return await WithVerificationAsync(new(provider, true, safeVersion, "Unknown", "Unchecked", "已找到 Antigravity CLI（agy），尚無成功執行的驗證紀錄。可使用既有登入執行任務或連線測試；重新檢查不呼叫模型。"), command, ct);
             if (provider == "gemini")
-                return new(provider, true, safeVersion, "Unknown", "Unchecked", "Gemini CLI 沒有統一的免額度登入狀態命令。請完成官方登入後，按連線測試確認；登入與執行是分開檢查。");
+                return await WithVerificationAsync(new(provider, true, safeVersion, "Unknown", "Unchecked", "尚無成功執行的驗證紀錄。請完成官方登入後，執行任務或連線測試確認。"), command, ct);
             var login = await process.RunAsync(command.Executable, [.. command.PrefixArguments, .. provider == "claude" ? new[] { "auth", "status" } : new[] { "login", "status" }], root, null, timeout.Token);
             if (provider == "claude")
             {
@@ -195,11 +208,11 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
                     else if (!loggedIn && login.ExitCode == 1) claudeState = "LoggedOut";
                 }
                 catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException) { }
-                return new(provider, true, safeVersion, claudeState, "Unchecked", "Claude Code 登入與模型使用資格分開檢查。尚未付費也可保留設定；需要使用時再完成官方登入與確認資格。");
+                return await WithVerificationAsync(new(provider, true, safeVersion, claudeState, "Unchecked", "Claude Code 登入與模型使用資格分開檢查。尚未付費也可保留設定；需要使用時再完成官方登入與確認資格。"), command, ct);
             }
             var combined = login.StandardOutput + login.StandardError;
             var state = login.ExitCode == 0 ? "LoggedIn" : combined.Contains("not logged", StringComparison.OrdinalIgnoreCase) ? "LoggedOut" : "Unknown";
-            return new(provider, true, safeVersion, state, "Unchecked", state == "LoggedIn" ? "CLI 已登入；尚未測試模型執行。" : "請使用官方 CLI 登入，或在本機終端檢查登入狀態。");
+            return await WithVerificationAsync(new(provider, true, safeVersion, state, "Unchecked", state == "LoggedIn" ? "CLI 已登入；模型使用資格以實際執行為準。" : "請使用官方 CLI 登入，或在本機終端檢查登入狀態。"), command, ct);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         { return new(provider, true, null, "Unknown", "TimedOut", "CLI 檢查逾時。"); }
@@ -269,9 +282,14 @@ public sealed class CliDiagnostics(IProcessRunner process, CliRegistry registry,
             if (!success)
             {
                 var failure = CliProbeFailure.Classify(result);
-                return new(selection.Provider, true, null, "Unknown", "Error", failure.Message, failure.Code, result.ExitCode);
+                if (failure.Code == "AuthenticationFailed") await CliVerificationEvidence.RecordAsync(verifications, selection.Provider, command, false, selection.Model, "Probe");
+                return new(selection.Provider, true, null, failure.Code == "AuthenticationFailed" ? "LoggedOut" : "Unknown", "Error", failure.Message, failure.Code, result.ExitCode,
+                    VerificationObservedAt: failure.Code == "AuthenticationFailed" ? DateTimeOffset.UtcNow : null);
             }
-            return new(selection.Provider, true, null, "VerifiedByExecution", "Ready", "指定的 CLI／模型已完成連線測試。", ExitCode: result.ExitCode);
+            await CliVerificationEvidence.RecordAsync(verifications, selection.Provider, command, true, selection.Model, "Probe");
+            var verifiedAt = DateTimeOffset.UtcNow;
+            return new(selection.Provider, true, null, "VerifiedByExecution", "Ready", "指定的 CLI／模型已完成連線測試。", ExitCode: result.ExitCode,
+                LastVerifiedAt: verifiedAt, VerifiedModel: selection.Model, VerificationSource: "Probe", VerificationObservedAt: verifiedAt);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         { return new(selection.Provider, true, null, "Unknown", "TimedOut", "模型連線測試逾時。"); }

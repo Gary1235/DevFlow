@@ -28,6 +28,7 @@ public sealed class AntigravityCliRunner(IProcessRunner process, string executab
 
     private async Task<string> Invoke(WorkTask task, Workspace workspace, Guid runId, string phase, bool planning, string instruction, CancellationToken ct)
     {
+        workspace = workspace with { Path = Path.GetFullPath(workspace.Path) };
         var selection = AiSelection.Normalize(planning ? task.Ai?.Planning : task.Ai?.Implementation);
         var prompt = $"""
             DevFlow phase: {phase}
@@ -37,7 +38,7 @@ public sealed class AntigravityCliRunner(IProcessRunner process, string executab
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
-            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation")}
+            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation", workspace.Path)}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);
@@ -47,13 +48,15 @@ public sealed class AntigravityCliRunner(IProcessRunner process, string executab
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.json"), result.StandardOutput, ct);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-agent.stderr.log"), result.StandardError, ct);
         if (result.ExitCode != 0) throw CliExecutionErrors.Failed("Antigravity", phase, result);
-        return ParseResult(result.StandardOutput, planning && task.ReadOnlyInstruction is null);
+        try { return ParseResult(result.StandardOutput, planning && task.ReadOnlyInstruction is null); }
+        catch (InvalidOperationException ex) when (CliProbeFailure.Classify(result).Code == "AuthenticationFailed")
+        { throw new InvalidOperationException("[Authentication] Antigravity：驗證失敗，請重新登入後再確認。", ex); }
     }
 
     internal static List<string> Arguments(AiSelection selection, bool planning)
     {
         List<string> args = ["--input-format", "stream-json", "--output-format", "stream-json",
-            "--sandbox", "--mode", planning ? "plan" : "accept-edits", "--print-timeout", "15m"];
+            "--sandbox", "--mode", planning ? "plan" : "accept-edits", "--print-timeout", "0"];
         if (selection.Model is not null) args.AddRange(["--model", selection.Model]);
         CliReasoning.AddArguments(args, selection);
         return args;

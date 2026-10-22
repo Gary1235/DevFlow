@@ -4,7 +4,8 @@ public enum TaskStatus { AwaitingPlan, AwaitingApproval, Queued, Running, Awaiti
 public enum RunKind { Implementation, Planning }
 public enum ReviewDecision { Approve, Reject }
 public sealed record ProjectDefinition(Guid Id, string Name, string RepositoryPath, string BaseBranch, string[] ValidationArguments,
-    AiConfiguration? AiDefaults = null, int Version = 0, Guid[]? DefaultRuleIds = null);
+    AiConfiguration? AiDefaults = null, int Version = 0, Guid[]? DefaultRuleIds = null,
+    ValidationProfile[]? ValidationProfiles = null, string? DefaultValidationProfileId = null, PreviewService[]? PreviewServices = null);
 public sealed record PlanDefinition(string Text, int Revision = 1, string? BaseCommit = null)
 {
     public string? Problem => PlanContent.Problem(Text);

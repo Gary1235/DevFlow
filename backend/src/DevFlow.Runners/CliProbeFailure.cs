@@ -18,7 +18,10 @@ internal static class CliProbeFailure
                 if (root.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
                 var isError = root.TryGetProperty("type", out var type) && type.GetString() is "error" or "turn.failed";
                 isError |= root.TryGetProperty("is_error", out var flag) && flag.ValueKind == System.Text.Json.JsonValueKind.True;
+                isError |= root.TryGetProperty("event", out var eventType) && eventType.GetString() == "error";
                 if (isError) errors += "\n" + root.GetRawText();
+                else if (root.TryGetProperty("result", out var eventResult) && eventResult.ValueKind == System.Text.Json.JsonValueKind.Object && eventResult.TryGetProperty("error", out var resultError) && resultError.ValueKind != System.Text.Json.JsonValueKind.Null)
+                    errors += "\n" + resultError.GetRawText();
                 else if (root.TryGetProperty("error", out var error) && error.ValueKind != System.Text.Json.JsonValueKind.Null)
                     errors += "\n" + error.GetRawText();
             }

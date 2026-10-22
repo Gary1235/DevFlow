@@ -15,7 +15,7 @@ public sealed record StoragePreview(Guid Id, DateTimeOffset ExpiresAt, int Older
 public sealed record StorageCleanupItem(string Key, string Title, string Kind, long Bytes, bool Success, string Message);
 public sealed record StorageCleanupReport(StorageCleanupItem[] Items, DateTimeOffset CompletedAt);
 
-public sealed class StorageManager(SqliteTaskStore store, IProcessRunner process, string artifactsRoot, string worktreeRoot, TimeProvider? clock = null)
+public sealed class StorageManager(SqliteTaskStore store, IProcessRunner process, string artifactsRoot, string worktreeRoot, TimeProvider? clock = null, Func<Guid, bool>? activePreview = null)
 {
     private readonly string artifacts = Full(artifactsRoot), worktrees = Full(worktreeRoot);
     private readonly SemaphoreSlim cleanupGate = new(1, 1);
@@ -126,6 +126,7 @@ public sealed class StorageManager(SqliteTaskStore store, IProcessRunner process
                     if (task.Version != planned.TaskVersion || task.Status is not (Status.Merged or Status.Cancelled) || runs.Any(NeedsInspection))
                         throw new ConflictException("任務狀態已改變，請重新預覽。");
                     var run = runs.Single(r => r.Id == item.RunId);
+                    if (activePreview?.Invoke(run.Id) == true) throw new ConflictException("此成果的本地預覽仍在執行，請先停止預覽。");
                     var project = await store.GetProjectAsync(task.ProjectId, timeout.Token) ?? throw new ConflictException("專案已不存在。");
                     ValidateTarget(item.Path, item.Kind == "artifacts" ? artifacts : worktrees, run.Id, item.Kind, await store.ListProjectsAsync(timeout.Token));
                     if (!Directory.Exists(item.Path)) throw new ConflictException("資料夾已不存在，請重新預覽。");

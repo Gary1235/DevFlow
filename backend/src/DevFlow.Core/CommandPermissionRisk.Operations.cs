@@ -15,6 +15,9 @@ internal static partial class CommandPermissionRisk
     private static PermissionAssessment? OtherCommand(List<string> words)
     {
         var name=words[0].ToLowerInvariant();var verb=words.Count>1?words[1].ToLowerInvariant():"";
+        // Bare dir lists the current directory in both Windows shells. Do not
+        // extend this to arguments: cmd and PowerShell use different grammars.
+        if(name=="dir"&&words.Count==1)return General("列出目前目錄／檔名");
         if(name=="npm"&&verb is "config" or "pkg"&&words.Count>2&&new[]{"set","delete","fix"}.Contains(words[2].ToLowerInvariant()))return new("Write","敏感操作：修改套件設定","會變更套件或工具設定，必須逐次確認。");
         if(name=="npm"&&verb=="publish"||name=="dotnet"&&verb=="nuget"&&words.Skip(2).Contains("push"))return new("Network","敏感操作：發布套件","可能上傳並發布套件到外部來源，必須確認目的地後逐次核准。");
         if(new[]{"dotnet","node","npm","rg"}.Contains(name)&&words.Count==2&&verb=="--version")return General("查詢工具版本");
@@ -106,6 +109,7 @@ internal static partial class CommandPermissionRisk
     private static PermissionAssessment Pipeline(JsonElement args,string workspace,List<string> segments)
     {
         if(segments.Any(string.IsNullOrWhiteSpace))return Unsupported("管線含空白階段或組合運算子，無法判定為唯讀。");
+        if(FileSearchPipeline(args,workspace,segments) is {} search)return search;
         var source=args.EnumerateObject().ToDictionary(p=>p.Name,p=>(object)p.Value.Clone());source["CommandLine"]=segments[0];
         var head=Assess(JsonSerializer.SerializeToElement(source),workspace);
         if(head is null||!head.BatchAllowed)return head??Unsupported("管線來源不是已支援的唯讀操作。");
@@ -117,6 +121,11 @@ internal static partial class CommandPermissionRisk
         return General("唯讀管線：篩選／排序／統計");
     }
     private static bool Property(string text)=>MetadataProperties.Contains(text,StringComparer.OrdinalIgnoreCase);
+    private static bool PropertyList(string text) {
+        var values=text.Split(',');
+        if(values.Length>1&&values[^1]=="")values=values[..^1];
+        return values.Length>0&&values.All(Property);
+    }
     private static bool SafePipelineStage(string stage)
     {
         // Script blocks are accepted only in this exact property/operator/literal grammar.
@@ -129,13 +138,13 @@ internal static partial class CommandPermissionRisk
         for(var i=1;i<words.Count;i++){
             var lower=words[i].ToLowerInvariant();
             if(lower is "-property" or "-expandproperty"){
-                if(lower=="-expandproperty"&&name!="select-object"||++i==words.Count||!words[i].Split(',').All(Property))return false;continue;
+                if(lower=="-expandproperty"&&name!="select-object"||++i==words.Count||!PropertyList(words[i]))return false;continue;
             }
             if(name=="select-object"&&lower is "-first" or "-skip" or "-last"){
                 if(++i==words.Count||!int.TryParse(words[i],out var count)||count<0)return false;continue;
             }
             if(lower=="-unique"&&name is "select-object" or "sort-object"||name=="sort-object"&&lower=="-descending"||name=="measure-object"&&new[]{"-line","-word","-character","-sum","-minimum","-maximum","-average"}.Contains(lower))continue;
-            if(!words[i].Split(',').All(Property))return false;
+            if(!PropertyList(words[i]))return false;
         }
         return true;
     }

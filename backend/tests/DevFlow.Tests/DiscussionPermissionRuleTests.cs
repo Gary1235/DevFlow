@@ -8,6 +8,28 @@ namespace DevFlow.Tests;
 
 public sealed class DiscussionPermissionRuleTests
 {
+    [Fact] public async Task Default_policy_automatically_reads_across_providers_but_never_expands_discussion_to_writing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "devflow-discussion-policy-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        try {
+            var store = new SqliteTaskStore(Path.Combine(root, "test.db")); await store.InitializeAsync();
+            var project = new ProjectDefinition(Guid.NewGuid(), "Test", root, "main", ["test"]); await store.AddProjectAsync(project);
+            var discussion = new Discussion(Guid.NewGuid(), project.Id, "Test", new("codex"), [], [], [], 0, DateTimeOffset.UtcNow); await store.AddDiscussionAsync(discussion, default);
+            foreach (var provider in new[] { "codex", "claude", "gemini", "antigravity" }) {
+                using var operation = new DiscussionOperations.Operation(Guid.NewGuid(), new(provider), default);
+                operation.ConfigurePermissions(store, project.Id, discussion.Id);
+                Assert.True(await operation.RequestPermissionAsync("read_file", JsonSerializer.SerializeToElement(new { Path = "src/component.json" }), root, default));
+                Assert.Equal("AllowedByPolicy", Assert.Single(operation.Permissions).State);
+                Assert.True(await operation.RequestPermissionAsync("read_file",JsonSerializer.SerializeToElement(new{Path=".env"}),root,default));
+                Assert.Equal("AllowedByPolicy",operation.Permissions.Last().State);
+                var pending = operation.RequestPermissionAsync("write_file", JsonSerializer.SerializeToElement(new { Path = "src/component.ts" }), root, default);
+                Assert.False(pending.IsCompleted); Assert.True(operation.Permissions.Last().Risk.FixedBoundary);
+                operation.ReplyPermission(operation.Permissions.Last().Id, false); Assert.False(await pending);
+            }
+        } finally { Directory.Delete(root, true); }
+    }
+
     [Theory]
     [InlineData("Discussion")]
     
@@ -18,6 +40,7 @@ public sealed class DiscussionPermissionRuleTests
         try
         {
             var store = new SqliteTaskStore(Path.Combine(root,"test.db")); await store.InitializeAsync();
+            await store.SavePermissionPolicyAsync(new(AutomationEnabled: false), 0);
             var project = new ProjectDefinition(Guid.NewGuid(),"Test",root,"main",["test"]);
             await store.AddProjectAsync(project);
             var discussion = new Discussion(Guid.NewGuid(),project.Id,"Test",new("codex"),[],[],[],0,DateTimeOffset.UtcNow);

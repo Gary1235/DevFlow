@@ -2158,3 +2158,366 @@ footer {
   overflow-wrap: anywhere;
   font-family: Consolas, monospace;
 }
+
+
+/* Structured Plan Document & Modal Formatting */
+.plan-toolbar-heading {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.plan-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plan-toolbar-actions select {
+  width: auto;
+  min-width: 110px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
+.plan-mode-switch {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.plan-mode-switch button {
+  border: 0;
+  background: transparent;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 5px 11px;
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.plan-mode-switch button:hover:not(.active) {
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.plan-mode-switch button.active {
+  background: #ffffff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.plan-expand-btn {
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.plan-expand-btn:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #60a5fa;
+}
+
+.plan-document-surface {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-top: 3px solid #2563eb;
+  border-radius: 10px;
+  padding: 20px 24px;
+  min-height: 320px;
+  max-height: 540px;
+  overflow: auto;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.plan-modal-body {
+  display: grid;
+  gap: 14px;
+  background: #f1f5f9;
+}
+
+.plan-modal-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  padding: 10px 16px;
+}
+
+.plan-modal-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.plan-modal-document {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-top: 4px solid #2563eb;
+  border-radius: 10px;
+  padding: 26px 32px;
+  min-height: 420px;
+  max-height: calc(88vh - 230px);
+  overflow: auto;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+}
+
+.plan-modal-editor {
+  min-height: 440px;
+  font-family: Consolas, "Cascadia Mono", "Microsoft JhengHei", monospace;
+  font-size: 13.5px;
+  line-height: 1.75;
+  background: #ffffff;
+}
+
+.plan-modal-footer {
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.plan-history-preview {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* Markdown Plan Document Elements */
+.plan-formatted-doc {
+  white-space: normal;
+  display: grid;
+  gap: 10px;
+  color: #1e293b;
+}
+
+.md-section {
+  display: grid;
+  gap: 8px;
+}
+
+.md-heading {
+  color: #0f172a;
+  font-weight: 800;
+  line-height: 1.35;
+  margin: 12px 0 4px;
+}
+
+.md-heading:first-child {
+  margin-top: 0;
+}
+
+.md-h1 {
+  font-size: 18px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #dbeafe;
+  color: #1e3a8a;
+}
+
+.md-h2 {
+  font-size: 15.5px;
+  padding: 6px 12px;
+  background: #eff6ff;
+  border-left: 4px solid #2563eb;
+  border-radius: 0 6px 6px 0;
+  color: #1e3a8a;
+}
+
+.md-h3 {
+  font-size: 14px;
+  color: #334155;
+  padding-left: 8px;
+  border-left: 3px solid #94a3b8;
+}
+
+.md-paragraph {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: #1e293b;
+}
+
+.md-divider {
+  border: 0;
+  border-top: 1px dashed #cbd5e1;
+  margin: 8px 0;
+}
+
+.md-list {
+  margin: 2px 0 4px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.md-list-item {
+  position: relative;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: #1e293b;
+}
+
+.md-list-item::before {
+  content: "•";
+  position: absolute;
+  left: 4px;
+  top: 0;
+  color: #2563eb;
+  font-weight: 800;
+}
+
+.md-list-item.depth-1 {
+  margin-left: 18px;
+}
+
+.md-list-item.depth-1::before {
+  content: "◦";
+  color: #64748b;
+}
+
+.md-list-item.depth-2,
+.md-list-item.depth-3 {
+  margin-left: 36px;
+}
+
+.md-list-item.depth-2::before,
+.md-list-item.depth-3::before {
+  content: "▪";
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.md-bold {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.md-inline-code {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  background: #e2e8f0;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  padding: 1px 6px;
+  border-radius: 5px;
+  word-break: break-word;
+}
+
+.md-quote {
+  margin: 4px 0;
+  padding: 10px 14px;
+  background: #fffbeb;
+  border-left: 4px solid #f59e0b;
+  border-radius: 0 7px 7px 0;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.step-structured-preview {
+  margin-top: 8px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.step-confirmation-banner {
+  display: grid;
+  gap: 12px;
+}
+
+.step-question-card {
+  margin-top: 8px;
+  padding: 12px 16px;
+  background: #ffffff;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+}
+
+.step-inspect-btn {
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.advanced-details {
+  margin-top: 8px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: #ffffff;
+}
+
+.advanced-details > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: #475569;
+  user-select: none;
+}
+
+.advanced-details > summary:hover {
+  color: #1d4ed8;
+}
+
+
+/* Scroll-synced Plan Preview & Editor Equalized Containers */
+.plan-document-surface {
+  height: 500px;
+  min-height: 320px;
+  max-height: 540px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.plan-editor:not(.sr-only):not(.plan-modal-editor) {
+  height: 500px;
+  min-height: 320px;
+  max-height: 540px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  font-family: Consolas, "Cascadia Mono", "Microsoft JhengHei", monospace;
+  font-size: 13.5px;
+  line-height: 1.75;
+  padding: 18px 22px;
+}
+
+.plan-modal-body {
+  overflow: hidden;
+}
+
+.plan-modal-document {
+  height: calc(88vh - 235px);
+  min-height: 380px;
+  max-height: calc(88vh - 235px);
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.plan-modal-editor {
+  height: calc(88vh - 235px);
+  min-height: 380px;
+  max-height: calc(88vh - 235px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  resize: none;
+  padding: 24px 28px;
+}

@@ -1,0 +1,16 @@
+.plan-side-column { min-width: 0; }
+.plan-discussion { display: flex; flex-direction: column; min-width: 0; max-height: 850px; }
+.plan-discussion > .panel-heading { align-items: flex-start; gap: 12px; }
+.plan-discussion-messages { overflow-y: auto; overflow-x: hidden; min-height: 140px; max-height: 440px; flex: 1 1 auto; overscroll-behavior: contain; padding: 4px; }
+.plan-discussion-message { padding: 12px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
+.plan-discussion-message.user { background: var(--surface-subtle); }
+.plan-discussion-message pre { max-width: 100%; overflow-x: auto; }
+.plan-discussion-message .chat-message-meta { flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.plan-proposal > button { margin-top: 12px; }
+.plan-proposal summary { cursor: pointer; }
+.plan-discussion-composer { display: grid; gap: 10px; flex: 0 0 auto; padding-top: 12px; border-top: 1px solid var(--line); }
+.plan-discussion-composer textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 76px; max-height: 180px; }
+.plan-discussion-models { max-height: 220px; overflow: auto; }
+.plan-discussion-models fieldset { min-width: 0; }
+.plan-discussion .button-row { flex-wrap: wrap; }
+@media (max-width: 800px) { .plan-discussion { max-height: 85vh; } }

@@ -23,6 +23,58 @@ public sealed class WorkflowApiTests : IAsyncLifetime
         client = factory.CreateClient(); return Task.CompletedTask;
     }
     public async Task DisposeAsync() { client.Dispose(); await factory.DisposeAsync(); Directory.Delete(root, true); }
+    [Theory]
+    [InlineData(DevFlow.Core.TaskStatus.Cancelled)]
+    [InlineData(DevFlow.Core.TaskStatus.Queued)]
+    [InlineData(DevFlow.Core.TaskStatus.PlanningQueued)]
+    [InlineData(DevFlow.Core.TaskStatus.Planning)]
+    public async Task Pending_models_can_change_without_starting_or_restarting_work(DevFlow.Core.TaskStatus status)
+    {
+        var store = factory.Services.GetRequiredService<SqliteTaskStore>();
+        var project = new ProjectDefinition(Guid.NewGuid(), "Demo", root, "main", ["test"]);
+        await store.AddProjectAsync(project);
+        var task = WorkTask.Create(project.Id, "Models", "Build", "Pass") with
+        {
+            Status = status,
+            Workflow = new(Steps: [new(Guid.NewGuid(), "Frontend", Selection: new("codex", "old-model"))])
+        };
+        await store.AddTaskAsync(task);
+        var next = task.Workflow with { Steps = [task.Workflow.Steps![0] with { Selection = new("claude", "new-model", "high") }] };
+        var response = await client.PutAsJsonAsync($"/api/tasks/{task.Id}/workflow", new { expectedVersion = task.Version, workflow = next });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var saved = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(status, saved.Status);
+        Assert.Equal(new AiSelection("claude", "new-model", "high"), saved.Workflow!.Steps![0].Selection);
+        Assert.Empty(await store.ListRunsAsync(task.Id));
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/tasks/{task.Id}/workflow", new { expectedVersion = task.Version, workflow = next })).StatusCode);
+    }
+    [Fact]
+    public async Task Planner_changes_are_atomic_and_blocked_during_execution()
+    {
+        var store = factory.Services.GetRequiredService<SqliteTaskStore>();
+        var project = new ProjectDefinition(Guid.NewGuid(), "Demo", root, "main", ["test"]);
+        await store.AddProjectAsync(project);
+        var task = WorkTask.Create(project.Id, "Models", "Build", "Pass") with
+        {
+            Status = DevFlow.Core.TaskStatus.PlanningQueued,
+            Ai = new(new("codex", "old-planner")),
+            Workflow = new(Steps: [new(Guid.NewGuid(), "Frontend", Selection: new("codex", "old-model"))])
+        };
+        await store.AddTaskAsync(task);
+        var next = task.Workflow with { Steps = [task.Workflow.Steps![0] with { Selection = new("claude", "new-model") }] };
+        var response = await client.PutAsJsonAsync($"/api/tasks/{task.Id}/workflow", new { expectedVersion = task.Version, workflow = next, planningSelection = new AiSelection("claude", "new-planner") });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var saved = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal("new-planner", saved.Ai!.Planning!.Model);
+        saved = saved with { Status = DevFlow.Core.TaskStatus.Planning, Version = saved.Version + 1 };
+        await store.SaveTaskAsync(saved, saved.Version - 1);
+        response = await client.PutAsJsonAsync($"/api/tasks/{task.Id}/workflow", new { expectedVersion = saved.Version, workflow = task.Workflow, planningSelection = new AiSelection("codex") });
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var unchanged = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(saved.Version, unchanged.Version);
+        Assert.Equal("new-model", unchanged.Workflow!.Steps![0].Selection!.Model);
+        Assert.Equal("new-planner", unchanged.Ai!.Planning!.Model);
+    }
     [Fact] public async Task Retry_preview_is_read_only_and_stale_confirmation_cannot_queue_work()
     {
         var store = factory.Services.GetRequiredService<SqliteTaskStore>();

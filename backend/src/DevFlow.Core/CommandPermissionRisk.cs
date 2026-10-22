@@ -11,10 +11,17 @@ internal static partial class CommandPermissionRisk
     public static PermissionAssessment? Assess(JsonElement args,string workspace)
     {
         if (!args.TryGetProperty("CommandLine",out var command)||command.ValueKind!=JsonValueKind.String) return null;
-        if (args.EnumerateObject().Any(p=>p.Name is not ("CommandLine" or "Cwd" or "WaitMsBeforeAsync" or "toolSummary" or "Options" or "Kind"))) return null;
+        if (args.EnumerateObject().Any(p=>p.Name is not ("CommandLine" or "Cwd" or "Shell" or "WaitMsBeforeAsync" or "toolSummary" or "Options" or "Kind"))) return null;
+        var powershell=true;
+        if(args.TryGetProperty("Shell",out var shell)) {
+            if(shell.ValueKind!=JsonValueKind.String||shell.GetString() is not ("powershell" or "bash" or "posix" or "unknown"))return null;
+            powershell=shell.GetString()=="powershell";
+            if(!powershell&&WorkspaceFileOperations.CommandName(command.GetString()!) is {} first&&WorkspaceFileOperations.IsFileCommand(first))return Unsupported("目前 Shell 未確認為 PowerShell，不套用其檔案指令或別名。");
+        }
         if(args.TryGetProperty("Kind",out var kind)&&(kind.ValueKind!=JsonValueKind.String||kind.GetString()!="command"))return null;
         if(args.TryGetProperty("Options",out var options)&&(options.ValueKind!=JsonValueKind.Object||options.EnumerateObject().Any(p=>p.Name is not ("description" or "timeout" or "timeout_ms"))))return null;
-        if(SplitPipeline(command.GetString()!) is {Count:>1} pipeline)return Pipeline(args,workspace,pipeline);
+        if(Sequence(args,workspace,command.GetString()!) is { } sequence)return sequence;
+        if(SplitPipeline(command.GetString()!) is {Count:>1} pipeline)return powershell?Pipeline(args,workspace,pipeline):Unsupported("此 Shell 的管線尚未確認全部副作用。");
         if(HasOutputRedirect(command.GetString()!))return new("Write","敏感操作：輸出寫檔","指令包含輸出重新導向，可能建立或覆寫檔案，必須逐次確認。");
         var words=Tokenize(command.GetString()!);if(words is not {Count:>0})return Unsupported("指令包含未支援的語法、參數展開或重新導向。");
         var cwd=workspace;
@@ -79,7 +86,7 @@ internal static partial class CommandPermissionRisk
         if(mode=="list"&&(seen.Contains("-recurse")||seen.Contains("-depth"))&&!RecursiveDirectorySafe(path??".",cwd))return BroadSearch();
         return General(mode switch{"list"=>"列出目錄／檔名","read"=>"讀取程式碼／文件",_=>"搜尋程式碼"});
     }
-    private static PermissionAssessment? Ripgrep(List<string> words,string cwd,string workspace)
+    private static PermissionAssessment? Ripgrep(List<string> words,string cwd,string workspace,PermissionPolicySettings? policy=null)
     {
         if(words.Count==2&&words[1]=="--version")return General("查詢搜尋工具版本");
         var positional=new List<string>();var pattern=false;var end=false;string? glob=null;var filesOnly=false;
@@ -89,16 +96,30 @@ internal static partial class CommandPermissionRisk
             if(!end&&word.StartsWith('-')){
                 if(word=="--files"){filesOnly=true;continue;}
                 if(word is "-g" or "--glob"){
-                    if(glob is not null||++i==words.Count)return Unsupported("只支援一個明確的程式碼副檔名篩選。");glob=words[i];continue;
+                    if(policy is null&&glob is not null||++i==words.Count)return Unsupported("搜尋篩選參數不完整。");glob=words[i];continue;
                 }
-                if(word.StartsWith("--glob=")){if(glob is not null)return null;glob=word[7..];continue;}
+                if(word.StartsWith("--glob=")){if(policy is null&&glob is not null)return null;glob=word[7..];continue;}
+                if(policy is not null&&word is "--iglob" or "-t" or "--type" or "-T" or "--type-not") {if(++i==words.Count)return PermissionPolicy.Unknown();continue;}
+                if(policy is not null&&word is "-A" or "-B" or "-C" or "--context" or "--after-context" or "--before-context" or "-m" or "--max-count") {
+                    if(++i==words.Count||!int.TryParse(words[i],out var count)||count<0)return PermissionPolicy.Unknown();continue;
+                }
+                if(policy is not null&&new[]{"--heading","--column","-H","--with-filename","--no-ignore","--no-ignore-vcs","-c","--count","--count-matches","-o","--only-matching","-q","--quiet"}.Contains(word))continue;
                 if(new[]{"-n","--line-number","-i","--ignore-case","-S","--smart-case","-F","--fixed-strings","-l","--files-with-matches","--no-heading","--hidden"}.Contains(word))continue;
                 if(word is "-e" or "--regexp"){
-                    if(pattern||++i==words.Count)return null;pattern=true;continue;
+                    if(policy is null&&pattern||++i==words.Count)return null;pattern=true;continue;
                 }
                 return UnsupportedFlag("rg",word);
             }
             if(!pattern&&!filesOnly){pattern=true;continue;}positional.Add(word);
+        }
+        if(policy is not null && (pattern || filesOnly)) {
+            foreach(var path in positional.DefaultIfEmpty(".")) {
+                // Filtering cannot add targets outside these roots. Inspect the
+                // full roots for links, independently of the number/type of globs.
+                var risk=PermissionPolicy.ReadSet(policy,Path.GetFullPath(path,cwd),workspace,namesOnly:filesOnly);
+                if(!risk.AutoAllowed)return risk;
+            }
+            return PermissionPolicy.Allow("GeneralRead",filesOnly?"工作副本內檔名查詢":"已檢查搜尋範圍的一般內容搜尋");
         }
         if(filesOnly){
             foreach(var path in positional.DefaultIfEmpty(".")){var risk=Targets(path,true,cwd,workspace,true);if(!risk.BatchAllowed)return risk;}
@@ -114,11 +135,12 @@ internal static partial class CommandPermissionRisk
         foreach(var path in positional){var risk=Targets(path,true,cwd,workspace,false);if(!risk.BatchAllowed)return risk;}
         return General("搜尋程式碼");
     }
-    private static PermissionAssessment? Git(List<string> words,string cwd,string workspace)
+    private static PermissionAssessment? Git(List<string> words,string cwd,string workspace,PermissionPolicySettings? policy=null)
     {
         var rest=words.Skip(1).ToList();
         if(rest.Count>0&&rest[0]=="--no-optional-locks")rest.RemoveAt(0);
         if(rest.Count==0)return null;
+        if(rest[0]=="grep")return GitGrep(rest,cwd,workspace);
         if(rest.Any(w=>w=="--output"||w.StartsWith("--output=")))return new("Write","敏感操作：Git 輸出寫檔","Git 查詢會將輸出寫入檔案，必須逐次確認。");
         if(rest[0] is "branch" or "tag"&&rest.Skip(1).Any(w=>w is "-d" or "-D" or "--delete"))return new("Deletion","刪除／高影響操作：Git 參照","會刪除分支或標籤，必須單次確認。");
         if(rest[0]=="--version"&&rest.Count==1)return General("查詢 Git 版本");
@@ -141,9 +163,10 @@ internal static partial class CommandPermissionRisk
         if(delimiter<0||delimiter==rest.Count-1)return BroadSearch();
         foreach(var path in rest.Skip(delimiter+1)){
             if(path.Contains('*')||path.Contains('?')||path.StartsWith(':'))return BroadSearch();
-            var risk=Targets(path,true,cwd,workspace,false);if(!risk.BatchAllowed)return risk;
+            var risk=policy is null?Targets(path,true,cwd,workspace,false):PermissionPolicy.ReadSet(policy,Path.GetFullPath(path,cwd),workspace);
+            if(policy is null?!risk.BatchAllowed:!risk.AutoAllowed)return risk;
         }
-        return General("查看程式碼差異");
+        return policy is null?General("查看程式碼差異"):PermissionPolicy.Allow("GeneralRead","查看工作副本檔案差異");
     }
     private static PermissionAssessment Targets(string path,bool literal,string cwd,string workspace,bool namesOnly)
     {
@@ -191,7 +214,7 @@ internal static partial class CommandPermissionRisk
     }
     private static PermissionAssessment General(string label)=>new("GeneralRead","一般讀取："+label,"完整指令與參數符合已支援的唯讀操作，目標限本次專案。",true);
     private static PermissionAssessment BroadSearch()=>new("SensitiveRead","敏感讀取：搜尋／讀取範圍過廣","已辨識為讀取或搜尋，但目標可能涵蓋機敏設定、資料庫或非程式碼檔案，必須單次確認。");
-    private static List<string>? Tokenize(string text)
+    internal static List<string>? Tokenize(string text)
     {
         var words=new List<string>();var index=0;
         while(index<text.Length){

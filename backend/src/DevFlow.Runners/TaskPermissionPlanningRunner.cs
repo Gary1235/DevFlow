@@ -37,19 +37,18 @@ public sealed class TaskPermissionPlanningRunner(IPlanningRunner inner, ITaskToo
             if (arguments.ValueKind != JsonValueKind.Object || arguments.GetRawText().Length > 20000)
                 throw new ArgumentException("工具參數格式無效或過長。");
             var now = DateTimeOffset.UtcNow;
-            var request = new TaskToolApproval(Guid.NewGuid(), taskId, id, tool, arguments.Clone(), workspace, now, now.AddMinutes(2)) { Provider = provider };
+            var request = new TaskToolApproval(Guid.NewGuid(), taskId, id, tool, arguments.Clone(), workspace, now, null) { Provider = provider, ReadOnly = readOnly };
             await store.AddToolApprovalAsync(request, ct);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
-            timeout.CancelAfter(TimeSpan.FromMinutes(2));
             try
             {
                 while (true)
                 {
                     var current = (await store.ListToolApprovalsAsync(taskId, timeout.Token)).Single(r => r.Id == request.Id);
-                    if (current.State is "Allowed" or "AllowedByRule") return true;
+                    if (current.State is "Allowed" or "AllowedByRule" or "AllowedByPolicy") return true;
                     if (current.State != "Pending")
                     {
-                        Failure = current.State == "Denied" ? "你已拒絕本次規劃工具操作，規劃已停止。" : "工具確認已逾時或規劃已停止；此次沒有取得核准。";
+                        Failure = current.State == "Denied" ? "你已拒絕本次工具操作，執行已停止。" : "工具確認已失效或執行已停止；此次沒有取得核准。";
                         return false;
                     }
                     await Task.Delay(200, timeout.Token);
@@ -57,10 +56,10 @@ public sealed class TaskPermissionPlanningRunner(IPlanningRunner inner, ITaskToo
             }
             catch (OperationCanceledException)
             {
-                Failure = ct.IsCancellationRequested || token.IsCancellationRequested ? "規劃已取消。" : "等待工具確認逾時（2 分鐘），此次沒有取得核准。請重新規劃後在任務頁回覆。";
+                Failure = token.IsCancellationRequested ? "執行已取消。" : "[CliInterrupted] CLI 工具確認通道已中斷，未取得核准。請查看執行紀錄。";
                 return false;
             }
-            finally { await store.ExpireToolApprovalAsync(taskId, request.Id, CancellationToken.None); }
+            finally { await store.ExpireToolApprovalAsync(taskId, request.Id, CancellationToken.None, Failure); }
         }
     }
 }

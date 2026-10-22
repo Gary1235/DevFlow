@@ -4,10 +4,18 @@ using DevFlow.Infrastructure;
 namespace DevFlow.Api;
 
 public sealed record PermissionRuleInput(Guid ProjectId, Guid? TaskId, string Tool, string Kind, string Pattern, bool Enabled = true, int? ExpectedVersion = null, string? Provider = null, Guid? DiscussionId = null);
+public sealed record PermissionPolicyInput(int ExpectedVersion, bool AutomationEnabled, string[]? SensitivePaths,
+    string[]? SensitiveCommands, string[]? SensitiveDestinations, string[]? ApprovedDownloadHosts);
 public static class ToolPermissionEndpoints
 {
     public static void MapToolPermissionEndpoints(this WebApplication app)
     {
+        app.MapGet("/api/tool-permission-policy", (SqliteTaskStore store, CancellationToken ct) => store.GetPermissionPolicyAsync(ct));
+        app.MapPut("/api/tool-permission-policy", (PermissionPolicyInput input, HttpContext context, SqliteTaskStore store, CancellationToken ct) => {
+            AiEndpoints.ExplicitAction(context);
+            return store.SavePermissionPolicyAsync(new(AutomationEnabled: input.AutomationEnabled, SensitivePaths: input.SensitivePaths,
+                SensitiveCommands: input.SensitiveCommands, SensitiveDestinations: input.SensitiveDestinations, ApprovedDownloadHosts: input.ApprovedDownloadHosts), input.ExpectedVersion, ct);
+        });
         app.MapGet("/api/tool-permission-rules", (SqliteTaskStore store, CancellationToken ct) => store.ListPermissionRulesAsync(ct));
         app.MapPost("/api/tool-permission-rules", async (PermissionRuleInput input, HttpContext context, SqliteTaskStore store, CancellationToken ct) =>
         {

@@ -45,22 +45,230 @@ export function ReasoningChoice({provider,model,value,onChange,label,disabled=fa
   return <><label>推理程度<select aria-label={label} value={value||''} disabled={disabled||(!efforts.length&&!value)} onChange={e=>onChange(e.target.value||null)}><option value="">CLI 預設</option>{efforts.map(e=><option key={e} value={e}>{effortNames[e]||e}（{e}）</option>)}{unverified&&<option value={value!}>已保存：{effortNames[value!]||value}（支援狀態待確認）</option>}</select></label>{manual?<p className="footnote">手動指定，支援狀態待 CLI 驗證；目前模型目錄未提供此預設模型的推理選項。</p>:provider?.id==='gemini'?<p className="footnote">推理設定由 Gemini CLI 管理。</p>:provider&&detail&&efforts.length>0?<p className="footnote">較高程度通常需要較長時間與較多用量。{provider.id==='claude'&&'實際等級可能由 CLI 依模型或組織限制調整。'}</p>:provider&&<p className="footnote">{model?'尚未取得此模型的推理選項；可沿用 CLI 預設。':'先選擇模型即可設定推理程度；未指定時沿用 CLI 設定。'}</p>}</>;
 }
 
+function renderInlineMarkdown(textValue: string): ReactNode[] {
+  const inlineParts = textValue.split(/(\*\*[^*]+\*\*|`[^`\n]+`)/g);
+  return inlineParts.map((tokenText, tokenIndex) => {
+    if (tokenText.startsWith('**') && tokenText.endsWith('**') && tokenText.length > 4) {
+      return (
+        <strong className="md-bold" key={tokenIndex}>
+          {tokenText.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (tokenText.startsWith('`') && tokenText.endsWith('`') && tokenText.length > 2) {
+      return (
+        <code className="md-inline-code" key={tokenIndex}>
+          {tokenText.slice(1, -1)}
+        </code>
+      );
+    }
+    return tokenText;
+  });
+}
+
+function renderMarkdownBlocks(
+  markdownSection: string,
+  sectionKeyPrefix: string,
+  baseLineOffset = 0,
+  baseCharOffset = 0
+): ReactNode[] {
+  const normalizedSection = markdownSection.replace(/\r\n/g, '\n');
+  const lines = normalizedSection.split('\n');
+  const renderedBlocks: ReactNode[] = [];
+  let listItemsBuffer: {
+    depth: number;
+    marker: string;
+    content: string;
+    lineIndex: number;
+    charOffset: number;
+  }[] = [];
+  let runningCharInSection = 0;
+
+  function flushListBuffer(flushKey: string) {
+    if (!listItemsBuffer.length) return;
+    const currentItems = listItemsBuffer;
+    listItemsBuffer = [];
+    const firstItem = currentItems[0];
+    renderedBlocks.push(
+      <ul
+        className="md-list"
+        key={flushKey}
+        data-source-line={firstItem.lineIndex}
+        data-char-offset={firstItem.charOffset}
+      >
+        {currentItems.map(listItem => (
+          <li
+            key={listItem.lineIndex}
+            className={'md-list-item depth-' + Math.min(listItem.depth, 3)}
+            data-marker={listItem.marker}
+            data-source-line={listItem.lineIndex}
+            data-char-offset={listItem.charOffset}
+          >
+            {renderInlineMarkdown(listItem.content)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  lines.forEach((rawLine, relativeLineIndex) => {
+    const globalLineIndex = baseLineOffset + relativeLineIndex;
+    const globalCharOffset = baseCharOffset + runningCharInSection;
+    runningCharInSection += rawLine.length + 1;
+
+    const trimmedLine = rawLine.trim();
+    if (!trimmedLine) {
+      flushListBuffer(`${sectionKeyPrefix}-list-${globalLineIndex}`);
+      return;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmedLine)) {
+      flushListBuffer(`${sectionKeyPrefix}-list-${globalLineIndex}`);
+      renderedBlocks.push(
+        <hr
+          className="md-divider"
+          key={`${sectionKeyPrefix}-hr-${globalLineIndex}`}
+          data-source-line={globalLineIndex}
+          data-char-offset={globalCharOffset}
+        />
+      );
+      return;
+    }
+
+    const headingMatch = /^(#{1,4})\s+(.+)$/.exec(trimmedLine);
+    if (headingMatch) {
+      flushListBuffer(`${sectionKeyPrefix}-list-${globalLineIndex}`);
+      const headingLevel = headingMatch[1].length;
+      const headingContent = renderInlineMarkdown(headingMatch[2]);
+      if (headingLevel === 1) {
+        renderedBlocks.push(
+          <h3
+            className="md-heading md-h1"
+            key={`${sectionKeyPrefix}-h-${globalLineIndex}`}
+            data-source-line={globalLineIndex}
+            data-char-offset={globalCharOffset}
+          >
+            {headingContent}
+          </h3>
+        );
+      } else if (headingLevel === 2) {
+        renderedBlocks.push(
+          <h4
+            className="md-heading md-h2"
+            key={`${sectionKeyPrefix}-h-${globalLineIndex}`}
+            data-source-line={globalLineIndex}
+            data-char-offset={globalCharOffset}
+          >
+            {headingContent}
+          </h4>
+        );
+      } else {
+        renderedBlocks.push(
+          <h5
+            className="md-heading md-h3"
+            key={`${sectionKeyPrefix}-h-${globalLineIndex}`}
+            data-source-line={globalLineIndex}
+            data-char-offset={globalCharOffset}
+          >
+            {headingContent}
+          </h5>
+        );
+      }
+      return;
+    }
+
+    const listMatch = /^(\s*)([-*+]|\d+\.)\s+(.+)$/.exec(rawLine);
+    if (listMatch) {
+      const leadingSpaces = listMatch[1].replace(/\t/g, '  ').length;
+      const indentDepth = Math.floor(leadingSpaces / 2);
+      listItemsBuffer.push({
+        depth: indentDepth,
+        marker: listMatch[2],
+        content: listMatch[3],
+        lineIndex: globalLineIndex,
+        charOffset: globalCharOffset,
+      });
+      return;
+    }
+
+    if (trimmedLine.startsWith('>')) {
+      flushListBuffer(`${sectionKeyPrefix}-list-${globalLineIndex}`);
+      renderedBlocks.push(
+        <blockquote
+          className="md-quote"
+          key={`${sectionKeyPrefix}-q-${globalLineIndex}`}
+          data-source-line={globalLineIndex}
+          data-char-offset={globalCharOffset}
+        >
+          {renderInlineMarkdown(trimmedLine.replace(/^>\s*/, ''))}
+        </blockquote>
+      );
+      return;
+    }
+
+    flushListBuffer(`${sectionKeyPrefix}-list-${globalLineIndex}`);
+    renderedBlocks.push(
+      <p
+        className="md-paragraph"
+        key={`${sectionKeyPrefix}-p-${globalLineIndex}`}
+        data-source-line={globalLineIndex}
+        data-char-offset={globalCharOffset}
+      >
+        {renderInlineMarkdown(rawLine)}
+      </p>
+    );
+  });
+
+  flushListBuffer(`${sectionKeyPrefix}-list-end`);
+  return renderedBlocks;
+}
+
 export function ProseContent({ content }: { content: string }) {
   const [copiedBlockIndex, setCopiedBlockIndex] = useState<number | null>(null);
-  if (!content || !content.includes('```')) {
-    return <div className="prose">{content}</div>;
+  const hasStructuredSyntax =
+    Boolean(content) &&
+    (content.includes('\n') ||
+      content.includes('```') ||
+      content.includes('**') ||
+      content.includes('`') ||
+      /(^|\n)\s*(#{1,4}\s|[-*+]\s|\d+\.\s|---)/.test(content));
+
+  if (!content || !hasStructuredSyntax) {
+    return (
+      <div className="prose" data-source-line={0} data-char-offset={0}>
+        {content}
+      </div>
+    );
   }
-  const parts = content.split(/(```[\s\S]*?```)/g);
+
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+  const parts = normalizedContent.split(/(```[\s\S]*?```)/g);
+  let cumulativeLineOffset = 0;
+  let cumulativeCharOffset = 0;
+
   return (
-    <div className="prose prose-structured">
+    <div className="prose prose-structured plan-formatted-doc">
       {parts.map((segment, segmentIndex) => {
+        const segmentStartLine = cumulativeLineOffset;
+        const segmentStartChar = cumulativeCharOffset;
+        const segmentLineCount = segment.split('\n').length - 1;
+        cumulativeLineOffset += segmentLineCount;
+        cumulativeCharOffset += segment.length;
+
         if (segment.startsWith('```') && segment.endsWith('```') && segment.length >= 6) {
           const innerText = segment.slice(3, -3);
           const firstNewlineIndex = innerText.indexOf('\n');
-          const languageLabel = firstNewlineIndex >= 0 ? innerText.slice(0, firstNewlineIndex).trim() : '';
-          const codeText = firstNewlineIndex >= 0 ? innerText.slice(firstNewlineIndex + 1) : innerText;
+          const languageLabel =
+            firstNewlineIndex >= 0 ? innerText.slice(0, firstNewlineIndex).trim() : '';
+          const codeText =
+            firstNewlineIndex >= 0 ? innerText.slice(firstNewlineIndex + 1) : innerText;
           return (
-            <div className="prose-code-block" key={segmentIndex}>
+            <div
+              className="prose-code-block"
+              key={segmentIndex}
+              data-source-line={segmentStartLine}
+              data-char-offset={segmentStartChar}
+            >
               <div className="prose-code-header">
                 <span>{languageLabel || 'CODE'}</span>
                 <button
@@ -69,21 +277,36 @@ export function ProseContent({ content }: { content: string }) {
                   onClick={() => {
                     void navigator.clipboard?.writeText(codeText).then(() => {
                       setCopiedBlockIndex(segmentIndex);
-                      setTimeout(() => setCopiedBlockIndex(currentIndex => (currentIndex === segmentIndex ? null : currentIndex)), 2000);
+                      setTimeout(
+                        () =>
+                          setCopiedBlockIndex(currentIndex =>
+                            currentIndex === segmentIndex ? null : currentIndex
+                          ),
+                        2000
+                      );
                     });
                   }}
                 >
                   {copiedBlockIndex === segmentIndex ? '✓ 已複製' : '複製'}
                 </button>
               </div>
-              <pre><code>{codeText}</code></pre>
+              <pre>
+                <code>{codeText}</code>
+              </pre>
             </div>
           );
         }
-        return segment ? <span key={segmentIndex}>{segment}</span> : null;
+        return segment ? (
+          <div className="md-section" key={segmentIndex}>
+            {renderMarkdownBlocks(
+              segment,
+              `seg-${segmentIndex}`,
+              segmentStartLine,
+              segmentStartChar
+            )}
+          </div>
+        ) : null;
       })}
     </div>
   );
 }
-
-

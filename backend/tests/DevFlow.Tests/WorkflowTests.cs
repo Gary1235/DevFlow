@@ -131,10 +131,14 @@ public sealed class WorkflowTests : IAsyncLifetime
             Assert.Equal(running.Workflow!.Steps![0].Id, running.ActiveStepId);
             var modified = running.Workflow with { Steps = [running.Workflow.Steps[0] with { Name = "wrong" }, running.Workflow.Steps[1]] };
             await Assert.ThrowsAsync<ConflictException>(() => store.SetWorkflowAsync(task.Id, modified, running.Version));
-            await store.SetWorkflowAsync(task.Id, running.Workflow with { Steps = [running.Workflow.Steps[0], running.Workflow.Steps[1] with { Name = "changed" }] }, running.Version);
+            await store.SetWorkflowAsync(task.Id, running.Workflow with { Steps = [running.Workflow.Steps[0], running.Workflow.Steps[1] with { Name = "changed", Selection = new("claude", "new-model", "high") }] }, running.Version);
         };
         await Coordinator().ExecuteNextAsync();
         Assert.Equal("Feature · changed", agent.Calls.Last().Task.Title);
+        Assert.Equal(new AiSelection("claude", "new-model", "high"), agent.Calls.Last().Task.Ai!.Implementation);
+        var history = Assert.Single(await store.ListRunsAsync(task.Id));
+        Assert.Equal("backend-model", history.Steps![0].Selection!.Model);
+        Assert.Equal("new-model", history.Steps[1].Selection!.Model);
     }
     [Fact] public async Task Per_step_scope_is_checked_relative_to_previous_step_and_global_scope_is_still_enforced()
     {
@@ -205,6 +209,35 @@ public sealed class WorkflowTests : IAsyncLifetime
         Assert.Equal(Status.AwaitingReview, completedTask.Status);
         Assert.Equal(4, agent.Calls.Count);
         Assert.Contains("超過上限直接阻擋並顯示提示訊息", agent.Calls.Last().Task.TaskRules);
+    }
+    [Fact] public async Task Each_step_resolves_its_own_validation_profile_and_builds_can_pass_without_fabricated_tests()
+    {
+        var profiles = new[] { new ValidationProfile("api", "API", ".", "dotnet", ["test"], "DotnetTest"), new ValidationProfile("web", "Build", ".", "node", ["build.js"]) };
+        await store.SetExecutionSettingsAsync(project.Id, project.Version, profiles, "api", [], null);
+        var task = await Add(Step("frontend") with { ValidationProfileId = "web" }, Step("build", "Validation") with { ValidationProfileId = "web" });
+        var validator = new ProfileValidator();
+        await Coordinator(validator: validator).ExecuteNextAsync();
+        Assert.Equal(Status.AwaitingReview, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.All(validator.Used, id => Assert.Equal("web", id));
+        Assert.Equal(3, validator.Used.Count);
+    }
+    [Fact] public async Task Tdd_cannot_be_satisfied_by_a_build_only_command()
+    {
+        await store.SetExecutionSettingsAsync(project.Id, project.Version, [new("web", "Build", ".", "node", ["build.js"])], "web", [], null);
+        var task = await Add(Step("frontend"));
+        await store.SaveTaskAsync(task with { Policy = new(true), Version = task.Version + 1 }, task.Version);
+        await Coordinator(validator: new ProfileValidator()).ExecuteNextAsync();
+        Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Empty(agent.Calls);
+        Assert.Contains("TDD", Assert.Single(await store.ListRunsAsync(task.Id)).Error);
+    }
+    private sealed class ProfileValidator : IValidationRunner
+    {
+        public List<string?> Used = [];
+        public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p, Workspace w, Guid id, TddPhase phase, CancellationToken ct) {
+            Used.Add(p.DefaultValidationProfileId);
+            return Task.FromResult(new ValidationEvidence(0, 0, 0, [], [], "Command"));
+        }
     }
     private sealed class AgentFixture : IAgentRunner
     {

@@ -1,5 +1,5 @@
 import {it,expect,vi} from 'vitest';
-import {render,screen,fireEvent,waitFor} from '@testing-library/react';
+import {act,render,screen,fireEvent,waitFor} from '@testing-library/react';
 import {ToolPermissions} from '../src/components/ToolPermissions';
 import {TaskPermissions} from '../src/components/TaskPermissions';
 import type {ToolPermission} from '../src/components/ToolPermissions';
@@ -49,13 +49,27 @@ it('shows a planning permission immediately above task content and posts to the 
   vi.stubGlobal('fetch',fetch);
   render(<TaskPermissions taskId="task" runId="operation" active />);
   await screen.findByRole('button',{name:'允許這一次'});
-  expect(screen.getByText(/最多等待 2 分鐘/)).toBeTruthy();
+  expect(screen.getByText(/DevFlow 不會因等待時間自動拒絕或核准/)).toBeTruthy();
   expect(fetch.mock.calls.every(call=>call[1]?.method==='GET')).toBe(true);
   fireEvent.click(screen.getByRole('button',{name:'允許這一次'}));
   await screen.findByText('已允許這一次');
   const post=fetch.mock.calls.find(call=>call[1]?.method==='POST')!;
   expect(post[0]).toBe('/api/tasks/task/permissions/request');
   expect(JSON.parse(String(post[1]?.body))).toEqual({operationId:'operation',allow:true});
+});
+it('only reminds after two minutes and invalidates controls when the CLI request ends',async()=>{
+  vi.useFakeTimers();vi.setSystemTime(new Date('2026-10-21T04:00:00Z'));
+  const fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+  const waiting={...request,createdAt:new Date().toISOString(),expiresAt:null};
+  const page=render(<ToolPermissions taskId="task" operationId="operation" requests={[waiting]} onAnswered={()=>{}}/>);
+  expect(screen.getByText(/2 分鐘後僅提醒，不設定確認期限/)).toBeTruthy();
+  await act(async()=>{await vi.advanceTimersByTimeAsync(120050);});
+  expect(screen.getByText(/提醒：已等待超過 2 分鐘/)).toBeTruthy();
+  expect(fetch).not.toHaveBeenCalled();expect((screen.getByRole('button',{name:'允許這一次'}) as HTMLButtonElement).disabled).toBe(false);
+  page.rerender(<ToolPermissions taskId="task" operationId="operation" requests={[{...waiting,state:'Expired',endReason:'CLI 工具確認通道已中斷'}]} onAnswered={()=>{}}/>);
+  expect(screen.getByText('確認已失效')).toBeTruthy();expect(screen.queryByRole('button',{name:'允許這一次'})).toBeNull();
+  expect(screen.getByText('CLI 工具確認通道已中斷')).toBeTruthy();
+  expect(fetch).not.toHaveBeenCalled();
 });
 it('puts pending requests before collapsed history inside one scrollable region',()=>{
   const history=Array.from({length:50},(_,i)=>({...request,id:'history-'+i,state:'Allowed' as const}));

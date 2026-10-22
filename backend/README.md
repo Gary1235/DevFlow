@@ -224,7 +224,7 @@ $env:DevFlow__CodexExecutable = 'C:\path\to\codex.exe'
 $env:DevFlow__DatabasePath = 'C:\path\to\DevFlow\.data\devflow.db'
 $env:DevFlow__ArtifactsRoot = 'C:\path\to\DevFlow\.data\artifacts'
 $env:DevFlow__WorktreeRoot = 'C:\path\to\DevFlow.Worktrees'
-$env:DevFlow__ExecutionTimeoutSeconds = '1800'
+$env:DevFlow__ExecutionTimeoutSeconds = '0' # 0 不設任務期限；正數可自訂秒數
 dotnet run --project src/DevFlow.Worker
 ```
 

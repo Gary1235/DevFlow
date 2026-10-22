@@ -24,6 +24,7 @@ public sealed class TaskPermissionTests : IAsyncLifetime
         Directory.CreateDirectory(root);
         var database = Path.Combine(root, "tasks.db");
         store = new(database); await store.InitializeAsync();
+        await store.SavePermissionPolicyAsync(new(AutomationEnabled: false), 0);
         var project = new ProjectDefinition(Guid.NewGuid(), "Test", root, "main", ["test"]);
         await store.AddProjectAsync(project);
         task = WorkTask.Create(project.Id, "Plan", "Inspect", "Validate") with { Ai = new(new("antigravity"), new("codex")) };
@@ -111,17 +112,16 @@ public sealed class TaskPermissionTests : IAsyncLifetime
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Cancelled_or_expired_approval_cannot_be_approved_later(bool cancel)
+    public async Task Only_cancelled_operations_expire_approvals_elapsed_time_is_not_a_deadline(bool cancel)
     {
         var claim = (await store.ClaimPlanningAsync())!;
-        var now = DateTimeOffset.UtcNow;
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
         using var args = JsonDocument.Parse("{\"CommandLine\":\"example\"}");
         var request = new TaskToolApproval(Guid.NewGuid(), task.Id, claim.Run.Id, "run_command", args.RootElement, root, now, now.AddMilliseconds(100));
         await store.AddToolApprovalAsync(request);
         if (cancel) await store.SaveTaskAsync(claim.Task.Cancel(), claim.Task.Version);
-        else await Task.Delay(150);
-        Assert.Equal("Expired", (await store.ListToolApprovalsAsync(task.Id)).Single().State);
-        Assert.Equal(HttpStatusCode.Conflict, (await Reply(request, true)).StatusCode);
+        Assert.Equal(cancel ? "Expired" : "Pending", (await store.ListToolApprovalsAsync(task.Id)).Single().State);
+        Assert.Equal(cancel ? HttpStatusCode.Conflict : HttpStatusCode.OK, (await Reply(request, true)).StatusCode);
     }
 
     [Fact] public async Task Cancelling_the_operation_expires_its_pending_request()
@@ -212,6 +212,45 @@ public sealed class TaskPermissionTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Conflict, (await Reply(request, true, rule: new("Project", "CommandPrefix", "Get-ChildItem"))).StatusCode);
         Assert.Empty(await store.ListPermissionRulesAsync());
     }
+    [Fact] public async Task Automatic_policy_is_shared_with_worker_and_preserves_workspace_and_readonly_boundaries()
+    {
+        var policy = await store.SavePermissionPolicyAsync(PermissionPolicySettings.Defaults, 1);
+        var claim = (await store.ClaimPlanningAsync())!;
+        var operation = new TaskPermissionPlanningRunner.Operation(store, task.Id, claim.Run.Id, default);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Assert.True(await operation.RequestPermissionAsync("read_file", JsonSerializer.SerializeToElement(new { Path = "source.json" }), root, timeout.Token));
+        // More than the manual confirmation cap must not interrupt automatic work.
+        var workerStore = new SqliteTaskStore(store.DatabasePath);
+        for (var i = 0; i < 51; i++) await workerStore.AddToolApprovalAsync(Request(task.Id, claim.Run.Id));
+        var saved = await store.ListToolApprovalsAsync(task.Id);
+        Assert.All(saved, r => { Assert.Equal("AllowedByPolicy", r.State); Assert.True(r.Risk.AutoAllowed); Assert.Equal(policy.Version, r.PolicyVersion); });
+        var sensitive = new TaskToolApproval(Guid.NewGuid(), task.Id, claim.Run.Id, "read_file", JsonSerializer.SerializeToElement(new { Path = ".env" }), root, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(2));
+        await workerStore.AddToolApprovalAsync(sensitive);
+        Assert.Equal("AllowedByPolicy", (await store.ListToolApprovalsAsync(task.Id)).Last().State);
+        var outside=sensitive with {Id=Guid.NewGuid(),Arguments=JsonSerializer.SerializeToElement(new{Path="../other-task/.env"})};
+        await workerStore.AddToolApprovalAsync(outside);
+        Assert.Equal("Pending", (await store.ListToolApprovalsAsync(task.Id)).Last().State);
+        var writing = sensitive with { Id = Guid.NewGuid(), Tool = "write_file", Arguments = JsonSerializer.SerializeToElement(new { Path = "source.ts" }) };
+        await workerStore.AddToolApprovalAsync(writing);
+        var blocked = (await store.ListToolApprovalsAsync(task.Id)).Last();
+        Assert.Equal("Pending", blocked.State); Assert.True(blocked.Risk.FixedBoundary);
+    }
+
+    [Fact] public async Task Policy_settings_require_explicit_same_origin_action_and_current_version()
+    {
+        const string path = "/api/tool-permission-policy";
+        var input = new { expectedVersion = 1, automationEnabled = true, sensitivePaths = new[] { "private/**" }, sensitiveCommands = new[] { "git status" }, sensitiveDestinations = new[] { "internal.example.com" }, approvedDownloadHosts = new[] { "registry.npmjs.org" } };
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync(path, input)).StatusCode);
+        client.DefaultRequestHeaders.Add("X-DevFlow-Action", "1");
+        client.DefaultRequestHeaders.Add("Origin", "https://foreign.example");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync(path, input)).StatusCode);
+        client.DefaultRequestHeaders.Remove("Origin");
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync(path, input)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync(path, input)).StatusCode);
+        var saved = (await client.GetFromJsonAsync<PermissionPolicySettings>(path))!;
+        Assert.Equal(2, saved.Version); Assert.True(saved.AutomationEnabled); Assert.Equal("private/**", Assert.Single(saved.SensitivePaths!));
+    }
+
     [Fact] public async Task Settings_api_rejects_sensitive_and_permanent_grants_even_when_posted_directly()
     {
         client.DefaultRequestHeaders.Add("X-DevFlow-Action","1");

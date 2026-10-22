@@ -504,7 +504,7 @@ function Workbench() {
                         查看任務
                       </button>
                       <button className="secondary" onClick={() => setSettings(projectItem)}>
-                        AI 預設
+                        專案設定
                       </button>
                     </div>
                   </article>

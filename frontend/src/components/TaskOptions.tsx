@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { api } from '../api';
 import { useResource } from '../hooks';
 import { WorkflowEditor } from './WorkflowEditor';
-import type { ExecutionPolicy, Provider, Rule, Workflow } from '../types';
+import type { ExecutionPolicy, Provider, Rule, Workflow, ValidationProfile } from '../types';
 
 export const stageLabels: Record<string, string> = {
   Discussion: '討論',
@@ -97,6 +97,7 @@ export function TaskOptions({
   workflow,
   onWorkflow,
   providers,
+  validationProfiles,
 }: {
   rules: Rule[];
   ruleIds: string[];
@@ -108,6 +109,7 @@ export function TaskOptions({
   workflow: Workflow;
   onWorkflow: (nextWorkflow: Workflow) => void;
   providers: Provider[];
+  validationProfiles?: ValidationProfile[];
 }) {
   return (
     <>
@@ -165,7 +167,7 @@ export function TaskOptions({
           </div>
         </details>
       </section>
-      <WorkflowEditor value={workflow} onChange={onWorkflow} providers={providers} />
+      <WorkflowEditor value={workflow} onChange={onWorkflow} providers={providers} validationProfiles={validationProfiles} />
     </>
   );
 }

@@ -4,6 +4,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
 {
     public async Task ExecuteAsync(WorkTask task, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct)
     {
+        workspace = workspace with { Path = Path.GetFullPath(workspace.Path) };
         var instruction = phase switch
         {
             TddPhase.Red => "Write meaningful failing tests for the acceptance criteria. Do not implement the feature yet. Preserve existing tests.",
@@ -23,7 +24,7 @@ public sealed class CodexCliRunner(IProcessRunner process, string executable, st
             Acceptance criteria: {task.AcceptanceCriteria}
             Approved plan: {task.Plan?.Text}
             Review feedback and retry instructions: {task.RevisionInstructions}
-            {TaskInstructions.For(task, "Implementation")}
+            {TaskInstructions.For(task, "Implementation", workspace.Path)}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"), task.ArtifactStage.StartsWith("Step-") ? task.ArtifactStage : "");
         Directory.CreateDirectory(directory);

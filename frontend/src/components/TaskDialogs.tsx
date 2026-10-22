@@ -6,6 +6,7 @@ import { TaskOptions, useRules } from './TaskOptions';
 import { FolderPicker } from './FolderPicker';
 import { workflowTemplate } from './WorkflowEditor';
 import { cleanWorkflow } from './WorkflowPanel';
+import { ProjectExecutionFields } from './ProjectExecutionFields';
 import { readWorkflowPreference, saveWorkflowPreference } from '../workflowPreferences';
 import type {
   BaseData,
@@ -285,6 +286,7 @@ export function TaskDialog({
                 <p className="error-banner">規則庫讀取失敗：{rulesResource.error}</p>
               )}
               <TaskOptions
+                validationProfiles={data.projects.find(p=>p.id===selectedProjectId)?.validationProfiles||[]}
                 rules={rulesResource.data || []}
                 ruleIds={ruleIds}
                 onRules={setRuleIds}
@@ -477,23 +479,28 @@ export function ProjectSettings({
     project.aiDefaults?.implementation || { provider: 'codex', model: null }
   );
   const [version] = useState(project.version);
+  const [validationProfiles,setValidationProfiles]=useState(project.validationProfiles||[]);
+  const [defaultValidationProfileId,setDefaultValidationProfileId]=useState(project.defaultValidationProfileId||null);
+  const [previewServices,setPreviewServices]=useState(project.previewServices||[]);
   const notice = useNotice();
   const action = useAction(notice);
 
   return (
-    <Modal title={project.name + ' · AI 預設'} eyebrow="PROJECT DEFAULTS" wide onClose={onClose}>
+    <Modal title={project.name + ' · 專案設定'} eyebrow="PROJECT SETTINGS" wide onClose={onClose}>
       <form
+        className="project-settings-form"
         onSubmit={event => {
           event.preventDefault();
           void action.run(async () => {
-            await api('/api/projects/' + project.id + '/ai-defaults', 'PUT', {
+            await api('/api/projects/' + project.id + '/execution-settings', 'PUT', {
               expectedVersion: version,
+              validationProfiles,defaultValidationProfileId,previewServices,
               aiDefaults: {
                 planning: planningSelection,
                 implementation: implementationSelection,
               },
             });
-            notice('AI 預設已保存，既有任務保留原設定。');
+            notice('專案設定已保存。驗證於下次執行時套用，AI 預設僅影響新任務。');
             onSaved();
             onClose();
           });
@@ -515,13 +522,14 @@ export function ProjectSettings({
             />
           </div>
           <p className="footnote">僅影響之後建立的任務。</p>
+          <ProjectExecutionFields profiles={validationProfiles} onProfiles={setValidationProfiles} defaultId={defaultValidationProfileId} onDefault={setDefaultValidationProfileId} services={previewServices} onServices={setPreviewServices}/>
         </div>
         <div className="dialog-footer">
           <button type="button" className="secondary" onClick={onClose}>
             取消
           </button>
           <button className="primary" disabled={action.busy}>
-            保存預設
+            保存專案設定
           </button>
         </div>
       </form>

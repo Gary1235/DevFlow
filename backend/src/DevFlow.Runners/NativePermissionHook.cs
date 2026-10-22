@@ -61,7 +61,8 @@ public sealed class NativePermissionHook : IAsyncDisposable
         }
         hooks["devflow-web-approval-" + operation.Id.ToString("N")] = JsonSerializer.SerializeToNode(new
         {
-            PreToolUse = new[] { new { matcher = "*", hooks = new[] { new { type = "command", command, timeout = 130 } } } }
+            // Do not impose a DevFlow deadline; the CLI owns the hook lifecycle.
+            PreToolUse = new[] { new { matcher = "*", hooks = new[] { new { type = "command", command } } } }
         });
         var created = !Directory.Exists(directory);
         Directory.CreateDirectory(directory);
@@ -100,14 +101,29 @@ public sealed class NativePermissionHook : IAsyncDisposable
         await using (pipe)
         {
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
-            await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+            var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+            try {
             var decision = "deny"; string reason = "確認已取消或失效。"; JsonElement? payload = null;
             try
             {
                 var line = await reader.ReadLineAsync(stop.Token);
                 if (line is null || line.Length > 64000) throw new ArgumentException("Invalid hook payload.");
                 using var json = JsonDocument.Parse(line); payload = json.RootElement.Clone();
-                (decision, reason) = await DecideAsync(json.RootElement, stop.Token);
+                using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+                var deciding = DecideAsync(json.RootElement, requestLifetime.Token);
+                var disconnected = reader.ReadLineAsync(requestLifetime.Token).AsTask();
+                try {
+                    if (await Task.WhenAny(deciding, disconnected) == disconnected) {
+                        requestLifetime.Cancel();
+                        await deciding;
+                        reason = "CLI 工具確認通道已中斷；未取得核准。";
+                    }
+                    else (decision, reason) = await deciding;
+                }
+                finally {
+                    requestLifetime.Cancel();
+                    try { await disconnected; } catch (OperationCanceledException) { }
+                }
             }
             catch (Exception ex) when (ex is OperationCanceledException or ArgumentException or JsonException or InvalidOperationException or IOException or KeyNotFoundException or ConflictException) { }
             await auditLock.WaitAsync();
@@ -115,6 +131,9 @@ public sealed class NativePermissionHook : IAsyncDisposable
             finally { auditLock.Release(); }
             try { await writer.WriteLineAsync(JsonSerializer.Serialize(new { decision, reason })); }
             catch (IOException) { }
+            } finally {
+                try { await writer.DisposeAsync(); } catch (IOException) { }
+            }
         }
     }
 
@@ -137,19 +156,26 @@ public sealed class NativePermissionHook : IAsyncDisposable
         if (tool is "ask_permission" or "ask_custom_permission")
             return ("deny", "請直接提出需要的具體工具操作，由網頁逐次確認；不建立持續性權限。");
         if (tool == "ask_question") return ("deny", "請在一般回覆中向使用者提問。");
-        if (operation.ReadOnly && PermissionRisk.Assess(tool,args,workspace).Category is "Write" or "Deletion")
-            return ("deny", "目前是唯讀規劃或討論，不允許寫入或刪除。");
-        // Read requests also go through classification; being inside a worktree does
-        // not make credentials or database files safe to read automatically.
+        // Reads also pass through the shared operation and worktree-boundary
+        // policy. The developer is responsible for isolating worktree secrets.
         if (tool is "list_permissions" or "finish") return ("allow", "沿用 CLI 原有規則。");
         var normalizedTool = tool is "write_to_file" or "replace_file_content" or "multi_replace_file_content" ? "write_file" : tool;
+        if(normalizedTool=="run_command") {
+            var commandArgs=JsonNode.Parse(args.GetRawText())!.AsObject();
+            // An unexpected shell override in tool input is not evidence of the
+            // actual executor. Do not silently replace it with a trusted claim.
+            commandArgs["Shell"]=commandArgs.ContainsKey("Shell")||commandArgs.ContainsKey("shell")?"unknown":OperatingSystem.IsWindows()?"powershell":"posix";
+            args=JsonSerializer.SerializeToElement(commandArgs);
+        }
         if (normalizedTool == "write_file" && args.TryGetProperty("TargetFile", out var target))
         {
             var normalized = JsonNode.Parse(args.GetRawText())!.AsObject(); normalized["Path"] = JsonValue.Create(target.GetString()); normalized.Remove("TargetFile");
             args = JsonSerializer.SerializeToElement(normalized);
         }
+        if(operation.ReadOnly&&PermissionPolicy.Assess(PermissionPolicySettings.Defaults,normalizedTool,args,workspace,readOnly:true).Category is "Write" or "Deletion")
+            return ("deny","目前是唯讀規劃或討論，不允許寫入或刪除。");
         var allowed = await operation.RequestPermissionAsync(normalizedTool, args, workspace, ct);
-        return allowed ? ("auto_approve", "使用者已在 DevFlow 網頁核准本次工具與參數，仍遵守明確禁止規則。") : ("deny", "使用者拒絕、確認逾時或回覆已停止。不得藉由改寫指令或替代工具規避此決定。");
+        return allowed ? ("auto_approve", "DevFlow 已依自動化政策、既有規則或本次人工確認核准這次工具與參數，仍遵守明確禁止規則。") : ("deny", $"本次工具未獲准執行：使用者拒絕、CLI 確認通道中斷或執行已停止。指定工作副本：{workspace}。不得藉由改寫指令或替代工具規避此決定，也不要離開工作副本搜尋 DevFlow 原始碼或其他專案排查權限。請回報受阻的工具與目標；如確需副本外資料，向使用者說明用途並取得額外授權。");
     }
 
     public async ValueTask DisposeAsync()
@@ -171,7 +197,9 @@ public sealed class NativePermissionHook : IAsyncDisposable
         object response = new { decision = "deny", reason = "無法連線到 DevFlow，預設拒絕。" };
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(125));
+            // Bound connection setup only. Once connected, wait for the CLI or web
+            // decision; EOF from a dead server is an interruption, never approval.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var input = await Console.In.ReadToEndAsync(timeout.Token);
             if (input.Length > 64000) throw new ArgumentException();
             using var json = JsonDocument.Parse(input);
@@ -180,7 +208,7 @@ public sealed class NativePermissionHook : IAsyncDisposable
             await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
             using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
             await writer.WriteLineAsync(json.RootElement.GetRawText());
-            var line = await reader.ReadLineAsync(timeout.Token);
+            var line = await reader.ReadLineAsync();
             using var result = JsonDocument.Parse(line ?? "{}");
             var decision = result.RootElement.GetProperty("decision").GetString();
             if (decision is "allow" or "auto_approve" or "deny") response = result.RootElement.Clone();

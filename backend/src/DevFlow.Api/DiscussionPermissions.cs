@@ -5,13 +5,17 @@ using DevFlow.Infrastructure;
 namespace DevFlow.Api;
 
 public sealed record ToolApproval(Guid Id, Guid OperationId, string Tool, JsonElement Arguments, string Workspace,
-    DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string State = "Pending")
+    DateTimeOffset CreatedAt, DateTimeOffset? ExpiresAt, string State = "Pending")
 {
+    public DateTimeOffset ReminderAt => CreatedAt.AddMinutes(2);
+    public string? EndReason { get; init; }
     public string Provider { get; init; } = "antigravity";
     public string ApprovalScope { get; init; } = "Once";
     public Guid? MatchedRuleId { get; init; }
     public bool RulesAvailable { get; init; }
-    public PermissionAssessment Risk => PermissionRisk.Assess(Tool, Arguments, Workspace);
+    public int? PolicyVersion { get; init; }
+    public PermissionAssessment? PolicyAssessment { get; init; }
+    public PermissionAssessment Risk => PolicyAssessment ?? PermissionRisk.Assess(Tool, Arguments, Workspace);
     public ToolPermissionOption[] RuleOptions => ToolPermissionMatching.Options(Tool, Arguments, Workspace);
 }
 public sealed record ToolApprovalReply(Guid OperationId, bool Allow, ToolPermissionChoice? Rule = null);
@@ -31,6 +35,7 @@ public sealed partial class DiscussionOperations
         private readonly Dictionary<Guid, PendingApproval> permissions = [];
         private SqliteTaskStore? ruleStore;
         private Guid ruleProject, ruleDiscussion;
+        public string? Failure { get; private set; }
         public void ConfigurePermissions(SqliteTaskStore store, Guid projectId, Guid discussionId)
         { ruleStore = store; ruleProject = projectId; ruleDiscussion = discussionId; }
         public ToolApproval[] Permissions { get { lock (sync) return permissions.Values.Select(p => p.Request).ToArray(); } }
@@ -40,29 +45,34 @@ public sealed partial class DiscussionOperations
             tool = WorkTask.Required(tool, 100);
             if (arguments.ValueKind != JsonValueKind.Object || arguments.GetRawText().Length > 20000)
                 throw new ArgumentException("工具參數格式無效或過長。");
-            var matched = ruleStore is null ? null : await ruleStore.MatchDiscussionRuleAsync(ruleProject, ruleDiscussion, Provider, tool, arguments, workspace, ct);
-            var request = new ToolApproval(Guid.NewGuid(), Id, tool, arguments.Clone(), workspace, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(2))
-            { Provider = Provider, RulesAvailable = ruleStore is not null, State = matched is null ? "Pending" : "AllowedByRule", MatchedRuleId = matched?.Id,
-                ApprovalScope = matched is null ? "Once" : matched.DiscussionId is null ? "Project" : "Discussion" };
+            var policy = ruleStore is null ? null : await ruleStore.GetPermissionPolicyAsync(ct);
+            var risk = policy is null ? PermissionRisk.Assess(tool, arguments, workspace) : PermissionPolicy.Assess(policy, tool, arguments, workspace, ReadOnly);
+            var matched = ruleStore is null || policy!.AutomationEnabled ? null : await ruleStore.MatchDiscussionRuleAsync(ruleProject, ruleDiscussion, Provider, tool, arguments, workspace, ct);
+            var request = new ToolApproval(Guid.NewGuid(), Id, tool, arguments.Clone(), workspace, DateTimeOffset.UtcNow, null)
+            { Provider = Provider, RulesAvailable = ruleStore is not null, State = risk.AutoAllowed ? "AllowedByPolicy" : matched is null ? "Pending" : "AllowedByRule", MatchedRuleId = matched?.Id,
+                PolicyVersion = policy?.Version, PolicyAssessment = risk,
+                ApprovalScope = risk.AutoAllowed ? "Policy" : matched is null ? "Once" : matched.DiscussionId is null ? "Project" : "Discussion" };
             var pending = new PendingApproval(request, new(TaskCreationOptions.RunContinuationsAsynchronously));
             lock (sync)
             {
                 if (disposed || Stopped || Token.IsCancellationRequested) return false;
-                if (matched is null && permissions.Values.Count(p => p.Request.State != "AllowedByRule") >= 50) throw new ConflictException("本次工具確認次數已達上限，請停止後重新提問。");
+                if (!risk.AutoAllowed && matched is null && permissions.Values.Count(p => p.Request.State is not ("AllowedByRule" or "AllowedByPolicy")) >= 50) throw new ConflictException("本次工具確認次數已達上限，請停止後重新提問。");
                 permissions.Add(request.Id, pending);
             }
-            if (matched is not null) return true;
+            if (risk.AutoAllowed || matched is not null) return true;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, Token);
-            timeout.CancelAfter(TimeSpan.FromMinutes(2));
             try { return await pending.Completion.Task.WaitAsync(timeout.Token); }
-            catch (OperationCanceledException) { return false; }
+            catch (OperationCanceledException) {
+                if (!Token.IsCancellationRequested) Failure = "[CliInterrupted] CLI 工具確認通道已中斷，未取得核准。請查看執行紀錄。";
+                return false;
+            }
             finally
             {
                 lock (sync)
                 {
                     var item = permissions[request.Id];
                     if (item.Request.State == "Pending")
-                        permissions[request.Id] = item with { Request = item.Request with { State = "Expired" } };
+                        permissions[request.Id] = item with { Request = item.Request with { State = "Expired", EndReason = Failure ?? "執行已結束或取消；此確認不再有效。" } };
                 }
             }
         }
@@ -71,7 +81,7 @@ public sealed partial class DiscussionOperations
         {
             lock (sync)
             {
-                if (disposed || Stopped || Token.IsCancellationRequested || !permissions.TryGetValue(id, out var item) || item.Request.State != "Pending" || item.Request.ExpiresAt <= DateTimeOffset.UtcNow)
+                if (disposed || Stopped || Token.IsCancellationRequested || !permissions.TryGetValue(id, out var item) || item.Request.State != "Pending")
                     throw new ConflictException("此確認已失效或已回覆，請重新整理對話。");
                 choice ??= new();
                 if (choice.Scope is not ("Once" or "Discussion") || !allow && choice.Scope != "Once") throw new ArgumentException("只允許單次或本次對話的一般讀取授權。");

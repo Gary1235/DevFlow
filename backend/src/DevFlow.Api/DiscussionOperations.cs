@@ -46,7 +46,7 @@ public sealed partial class DiscussionOperations
         public CancellationToken Token => token;
         public string Content { get { lock (sync) return content; } }
         public Operation(Guid id, AiSelection selection, CancellationToken shutdown)
-        { Id = id; Selection = selection; cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown); token = cancellation.Token; cancellation.CancelAfter(TimeSpan.FromMinutes(5)); }
+        { Id = id; Selection = selection; cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown); token = cancellation.Token; }
         public void Stop() { lock (sync) { if (disposed) throw new ConflictException("This reply has already finished."); Stopped = true; cancellation.Cancel(); } }
         public void Dispose() { lock (sync) { if (disposed) return; disposed = true; cancellation.Cancel(); cancellation.Dispose(); } }
 

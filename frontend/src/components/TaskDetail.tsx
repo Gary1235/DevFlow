@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, LatestRequest } from '../api';
 import { useAction, useResource } from '../hooks';
 import {
@@ -16,10 +16,12 @@ import {
 } from '../domain';
 import { Badge, Empty, Meta, Modal, ProseContent, useNotice } from './ui';
 import { TaskContext, AiReviewReports } from './TaskContext';
+import { PlanDiscussion } from './PlanDiscussion';
 import { TaskActivity } from './LiveActivity';
 import { TitleActivity, taskTitleState, useActivityPageTitle } from './TitleActivity';
 import { FailureRecovery, TaskModelSettings } from './FailureRecovery';
 import { RetryPanel } from './RetryPanel';
+import { TaskPreview } from './TaskPreview';
 import { WorkflowSettings } from './WorkflowPanel';
 import { TaskPermissions } from './TaskPermissions';
 import type {
@@ -35,20 +37,265 @@ import type {
   WorkTask,
 } from '../types';
 
+interface PlanScrollAnchor {
+  lineNumber: number;
+  charOffset: number;
+  scrollRatio: number;
+  windowScrollY: number;
+}
+
+function createTextareaMirror(textareaElement: HTMLTextAreaElement): HTMLDivElement {
+  const computedStyle = window.getComputedStyle(textareaElement);
+  const mirrorDiv = document.createElement('div');
+  mirrorDiv.style.position = 'fixed';
+  mirrorDiv.style.top = '-9999px';
+  mirrorDiv.style.left = '-9999px';
+  mirrorDiv.style.visibility = 'hidden';
+  mirrorDiv.style.pointerEvents = 'none';
+  mirrorDiv.style.whiteSpace = 'pre-wrap';
+  mirrorDiv.style.overflowWrap = 'break-word';
+  mirrorDiv.style.wordBreak = 'break-word';
+  mirrorDiv.style.boxSizing = computedStyle.boxSizing || 'border-box';
+  mirrorDiv.style.width = `${textareaElement.clientWidth || 680}px`;
+  mirrorDiv.style.fontFamily = computedStyle.fontFamily;
+  mirrorDiv.style.fontSize = computedStyle.fontSize;
+  mirrorDiv.style.fontWeight = computedStyle.fontWeight;
+  mirrorDiv.style.lineHeight = computedStyle.lineHeight;
+  mirrorDiv.style.letterSpacing = computedStyle.letterSpacing;
+  mirrorDiv.style.paddingTop = computedStyle.paddingTop;
+  mirrorDiv.style.paddingRight = computedStyle.paddingRight;
+  mirrorDiv.style.paddingBottom = computedStyle.paddingBottom;
+  mirrorDiv.style.paddingLeft = computedStyle.paddingLeft;
+  document.body.appendChild(mirrorDiv);
+  return mirrorDiv;
+}
+
+function measureTextareaCharOffsetTop(
+  textareaElement: HTMLTextAreaElement,
+  fullText: string,
+  targetCharOffset: number
+): number {
+  const mirrorDiv = createTextareaMirror(textareaElement);
+  try {
+    const normalizedText = fullText.replace(/\r\n/g, '\n');
+    const safeOffset = Math.min(normalizedText.length, Math.max(0, targetCharOffset));
+    mirrorDiv.textContent = normalizedText.slice(0, safeOffset);
+    const markerSpan = document.createElement('span');
+    markerSpan.textContent = '\u200b';
+    mirrorDiv.appendChild(markerSpan);
+    return markerSpan.offsetTop;
+  } finally {
+    mirrorDiv.remove();
+  }
+}
+
+function capturePreviewScrollAnchor(previewContainer: HTMLElement | null): PlanScrollAnchor {
+  const windowScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
+  if (!previewContainer) {
+    return { lineNumber: 0, charOffset: 0, scrollRatio: 0, windowScrollY };
+  }
+  const maxScroll = Math.max(0, previewContainer.scrollHeight - previewContainer.clientHeight);
+  const scrollRatio = maxScroll > 0 ? previewContainer.scrollTop / maxScroll : 0;
+  if (previewContainer.scrollTop <= 2) {
+    return { lineNumber: 0, charOffset: 0, scrollRatio: 0, windowScrollY };
+  }
+
+  const allSourceBlocks = Array.from(
+    previewContainer.querySelectorAll<HTMLElement>('[data-source-line]')
+  );
+  const leafBlocks = allSourceBlocks.filter(
+    blockElement => !blockElement.querySelector('[data-source-line]')
+  );
+  const candidateBlocks = leafBlocks.length > 0 ? leafBlocks : allSourceBlocks;
+  const containerRect = previewContainer.getBoundingClientRect();
+  let matchedBlock = candidateBlocks[0];
+
+  for (const blockElement of candidateBlocks) {
+    const blockRect = blockElement.getBoundingClientRect();
+    if (blockRect.bottom > containerRect.top + 10) {
+      matchedBlock = blockElement;
+      break;
+    }
+  }
+
+  return {
+    lineNumber: Number(matchedBlock?.dataset.sourceLine || 0),
+    charOffset: Number(matchedBlock?.dataset.charOffset || 0),
+    scrollRatio,
+    windowScrollY,
+  };
+}
+
+function captureEditorScrollAnchor(
+  textareaElement: HTMLTextAreaElement | null,
+  fullText: string
+): PlanScrollAnchor {
+  const windowScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
+  if (!textareaElement) {
+    return { lineNumber: 0, charOffset: 0, scrollRatio: 0, windowScrollY };
+  }
+  const maxScroll = Math.max(0, textareaElement.scrollHeight - textareaElement.clientHeight);
+  const scrollRatio = maxScroll > 0 ? textareaElement.scrollTop / maxScroll : 0;
+  const normalizedText = fullText.replace(/\r\n/g, '\n');
+  const textLines = normalizedText.split('\n');
+  const lineOffsets: number[] = [];
+  let runningOffset = 0;
+  for (const lineText of textLines) {
+    lineOffsets.push(runningOffset);
+    runningOffset += lineText.length + 1;
+  }
+
+  if (textareaElement.scrollTop <= 2) {
+    return { lineNumber: 0, charOffset: 0, scrollRatio: 0, windowScrollY };
+  }
+
+  const targetScrollY = textareaElement.scrollTop + 14;
+  const mirrorDiv = createTextareaMirror(textareaElement);
+  try {
+    let lowIndex = 0;
+    let highIndex = textLines.length - 1;
+    let bestLineIndex = 0;
+
+    while (lowIndex <= highIndex) {
+      const midIndex = Math.floor((lowIndex + highIndex) / 2);
+      mirrorDiv.textContent = normalizedText.slice(0, lineOffsets[midIndex]);
+      const markerSpan = document.createElement('span');
+      markerSpan.textContent = '\u200b';
+      mirrorDiv.appendChild(markerSpan);
+      const measuredTop = markerSpan.offsetTop;
+
+      if (measuredTop <= targetScrollY) {
+        bestLineIndex = midIndex;
+        lowIndex = midIndex + 1;
+      } else {
+        highIndex = midIndex - 1;
+      }
+    }
+
+    if (bestLineIndex === 0 && scrollRatio > 0.05 && mirrorDiv.scrollHeight === 0) {
+      bestLineIndex = Math.min(
+        textLines.length - 1,
+        Math.max(0, Math.round(scrollRatio * (textLines.length - 1)))
+      );
+    }
+
+    return {
+      lineNumber: bestLineIndex,
+      charOffset: lineOffsets[bestLineIndex] || 0,
+      scrollRatio,
+      windowScrollY,
+    };
+  } finally {
+    mirrorDiv.remove();
+  }
+}
+
+function applyScrollAnchorToEditor(
+  textareaElement: HTMLTextAreaElement | null,
+  anchor: PlanScrollAnchor,
+  fullText: string
+) {
+  if (!textareaElement) return;
+  const normalizedText = fullText.replace(/\r\n/g, '\n');
+  const safeCharOffset = Math.min(normalizedText.length, Math.max(0, anchor.charOffset));
+  const maxScroll = Math.max(0, textareaElement.scrollHeight - textareaElement.clientHeight);
+
+  let targetScrollTop = 0;
+  if (anchor.scrollRatio >= 0.99 && maxScroll > 0) {
+    targetScrollTop = maxScroll;
+  } else if (anchor.lineNumber > 0 || anchor.scrollRatio > 0.01) {
+    const measuredPixelTop = measureTextareaCharOffsetTop(
+      textareaElement,
+      normalizedText,
+      safeCharOffset
+    );
+    if (measuredPixelTop > 0) {
+      targetScrollTop = Math.min(maxScroll, Math.max(0, measuredPixelTop - 14));
+    } else if (maxScroll > 0) {
+      targetScrollTop = Math.round(anchor.scrollRatio * maxScroll);
+    }
+  }
+
+  textareaElement.focus({ preventScroll: true });
+  textareaElement.setSelectionRange(safeCharOffset, safeCharOffset);
+  textareaElement.scrollTop = targetScrollTop;
+  if (typeof window !== 'undefined' && Math.abs(window.scrollY - anchor.windowScrollY) > 2) {
+    window.scrollTo({ top: anchor.windowScrollY });
+  }
+}
+
+function applyScrollAnchorToPreview(
+  previewContainer: HTMLElement | null,
+  anchor: PlanScrollAnchor
+) {
+  if (!previewContainer) return;
+  const maxScroll = Math.max(0, previewContainer.scrollHeight - previewContainer.clientHeight);
+  if (anchor.scrollRatio >= 0.99 && maxScroll > 0) {
+    previewContainer.scrollTop = maxScroll;
+  } else if (anchor.lineNumber <= 0 && anchor.scrollRatio <= 0.01) {
+    previewContainer.scrollTop = 0;
+  } else {
+    const allSourceBlocks = Array.from(
+      previewContainer.querySelectorAll<HTMLElement>('[data-source-line]')
+    );
+    const leafBlocks = allSourceBlocks.filter(
+      blockElement => !blockElement.querySelector('[data-source-line]')
+    );
+    const candidateBlocks = leafBlocks.length > 0 ? leafBlocks : allSourceBlocks;
+    let targetBlock = candidateBlocks[0];
+
+    for (const blockElement of candidateBlocks) {
+      const blockLine = Number(blockElement.dataset.sourceLine || 0);
+      if (blockLine <= anchor.lineNumber) {
+        targetBlock = blockElement;
+      } else {
+        break;
+      }
+    }
+
+    if (targetBlock && maxScroll > 0) {
+      const containerRect = previewContainer.getBoundingClientRect();
+      const blockRect = targetBlock.getBoundingClientRect();
+      const targetScrollTop = previewContainer.scrollTop + (blockRect.top - containerRect.top) - 12;
+      previewContainer.scrollTop = Math.min(maxScroll, Math.max(0, targetScrollTop));
+    } else if (maxScroll > 0) {
+      previewContainer.scrollTop = Math.round(anchor.scrollRatio * maxScroll);
+    }
+  }
+
+  if (typeof window !== 'undefined' && Math.abs(window.scrollY - anchor.windowScrollY) > 2) {
+    window.scrollTo({ top: anchor.windowScrollY });
+  }
+}
+
 function PlanPanel({
   data,
   onChanged,
   onDirty,
+  modalOpenExternal = false,
+  onCloseExternalModal,
 }: {
   data: DetailData;
   onChanged: () => void;
   onDirty: (dirty: boolean) => void;
+  modalOpenExternal?: boolean;
+  onCloseExternalModal?: () => void;
 }) {
   const currentTask = data.task;
   const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
   const [draftText, setDraftText] = useState<string | null>(null);
   const [versionSnapshot, setVersionSnapshot] = useState<number | null>(null);
   const [revisionSnapshot, setRevisionSnapshot] = useState<number | null>(null);
+  const [isInlineEditing, setIsInlineEditing] = useState(false);
+  const [discussionOpen, setDiscussionOpen] = useState(false);
+  const [isPlanModalOpen, setIsPlanModalOpen] = useState(false);
+  const [modalViewMode, setModalViewMode] = useState<'preview' | 'edit'>('preview');
+  const inlinePreviewRef = useRef<HTMLDivElement | null>(null);
+  const inlineEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const modalPreviewRef = useRef<HTMLDivElement | null>(null);
+  const modalEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingInlineAnchorRef = useRef<PlanScrollAnchor | null>(null);
+  const pendingModalAnchorRef = useRef<PlanScrollAnchor | null>(null);
   const notice = useNotice();
   const action = useAction(notice);
 
@@ -60,127 +307,385 @@ function PlanPanel({
       ? currentTask.plan
       : data.plans.find(planItem => planItem.revision === selectedRevision);
   const isDirty = draftText !== null;
+  const activePlanText = draftText ?? chosenPlan?.text ?? '';
+  const showModal = isPlanModalOpen || modalOpenExternal;
 
   useEffect(() => {
     onDirty(isDirty || !isCurrentRevision);
   }, [isDirty, isCurrentRevision, onDirty]);
 
+  useLayoutEffect(() => {
+    const anchor = pendingInlineAnchorRef.current;
+    if (!anchor) return;
+    pendingInlineAnchorRef.current = null;
+    if (isInlineEditing) {
+      applyScrollAnchorToEditor(inlineEditorRef.current, anchor, activePlanText);
+    } else {
+      applyScrollAnchorAnchorWithFrame(inlinePreviewRef.current, anchor);
+    }
+  }, [isInlineEditing, activePlanText]);
+
+  useLayoutEffect(() => {
+    if (!showModal) return;
+    const anchor = pendingModalAnchorRef.current;
+    if (!anchor) return;
+    pendingModalAnchorRef.current = null;
+    if (modalViewMode === 'edit') {
+      applyScrollAnchorToEditor(modalEditorRef.current, anchor, activePlanText);
+    } else {
+      applyScrollAnchorAnchorWithFrame(modalPreviewRef.current, anchor);
+    }
+  }, [showModal, modalViewMode, activePlanText]);
+
+  function applyScrollAnchorAnchorWithFrame(
+    previewContainer: HTMLElement | null,
+    anchor: PlanScrollAnchor
+  ) {
+    applyScrollAnchorToPreview(previewContainer, anchor);
+    requestAnimationFrame(() => {
+      applyScrollAnchorToPreview(previewContainer, anchor);
+    });
+  }
+
+  function switchInlineMode(targetEditMode: boolean) {
+    if (targetEditMode === isInlineEditing) return;
+    pendingInlineAnchorRef.current = isInlineEditing
+      ? captureEditorScrollAnchor(inlineEditorRef.current, activePlanText)
+      : capturePreviewScrollAnchor(inlinePreviewRef.current);
+    setIsInlineEditing(targetEditMode);
+  }
+
+  function switchModalMode(targetMode: 'preview' | 'edit') {
+    if (targetMode === modalViewMode) return;
+    pendingModalAnchorRef.current =
+      modalViewMode === 'edit'
+        ? captureEditorScrollAnchor(modalEditorRef.current, activePlanText)
+        : capturePreviewScrollAnchor(modalPreviewRef.current);
+    setModalViewMode(targetMode);
+  }
+
+  function openPlanModalWithSync(initialMode: 'preview' | 'edit' = 'preview') {
+    pendingModalAnchorRef.current = isInlineEditing
+      ? captureEditorScrollAnchor(inlineEditorRef.current, activePlanText)
+      : capturePreviewScrollAnchor(inlinePreviewRef.current);
+    setModalViewMode(initialMode);
+    setIsPlanModalOpen(true);
+  }
+
+  function handleDraftChange(nextValue: string) {
+    if (!isDirty) {
+      setVersionSnapshot(currentTask.version);
+      setRevisionSnapshot(currentTask.plan?.revision ?? null);
+    }
+    setDraftText(nextValue);
+  }
+
+  function handleResetPlan() {
+    setDraftText(null);
+    setSelectedRevision(null);
+    setVersionSnapshot(null);
+  }
+
+  async function handleSavePlan() {
+    if (isInlineEditing) {
+      pendingInlineAnchorRef.current = captureEditorScrollAnchor(
+        inlineEditorRef.current,
+        activePlanText
+      );
+    }
+    if (showModal && modalViewMode === 'edit') {
+      pendingModalAnchorRef.current = captureEditorScrollAnchor(
+        modalEditorRef.current,
+        activePlanText
+      );
+    }
+    await api('/api/tasks/' + currentTask.id + '/plan', 'POST', {
+      text: activePlanText,
+      expectedVersion: versionSnapshot ?? currentTask.version,
+    });
+    setDraftText(null);
+    setSelectedRevision(null);
+    setIsInlineEditing(false);
+    setModalViewMode('preview');
+    notice('計畫已保存，請核准新版本。');
+    onChanged();
+  }
+
+  function closePlanModal() {
+    pendingInlineAnchorRef.current =
+      modalViewMode === 'edit'
+        ? captureEditorScrollAnchor(modalEditorRef.current, activePlanText)
+        : capturePreviewScrollAnchor(modalPreviewRef.current);
+    setIsPlanModalOpen(false);
+    onCloseExternalModal?.();
+    requestAnimationFrame(() => {
+      const anchor = pendingInlineAnchorRef.current;
+      if (!anchor) return;
+      pendingInlineAnchorRef.current = null;
+      if (isInlineEditing) {
+        applyScrollAnchorToEditor(inlineEditorRef.current, anchor, activePlanText);
+      } else {
+        applyScrollAnchorToPreview(inlinePreviewRef.current, anchor);
+      }
+    });
+  }
+
   return (
-    <div className="detail-grid">
-      <article className="panel">
-        <div className="panel-heading">
-          <div>
-            <h2>實作計畫（由規劃 AI 擬定，經你確認後執行）</h2>
-            <p>
-              目前版本 {currentTask.plan?.revision || '尚未建立'} · 基底{' '}
-              {shortCommit(currentTask.plan?.baseCommit)}
-            </p>
+    <>
+      <div className="detail-grid">
+        <article className="panel plan-panel-card">
+          <div className="panel-heading plan-toolbar-heading">
+            <div>
+              <h2>實作計畫（由規劃 AI 擬定，經你確認後執行）</h2>
+              <p>
+                目前版本 {currentTask.plan?.revision || '尚未建立'} · 基底{' '}
+                {shortCommit(currentTask.plan?.baseCommit)}
+              </p>
+            </div>
+            <div className="plan-toolbar-actions">
+              <button type="button" className="secondary" aria-expanded={discussionOpen} onClick={()=>setDiscussionOpen(!discussionOpen)}>
+                與規劃 AI 討論
+              </button>
+              <select
+                aria-label="計畫版本"
+                value={selectedRevision ?? currentTask.plan?.revision ?? ''}
+                onChange={event => {
+                  if (isDirty) {
+                    notice('請先保存編輯或重新讀取當前版本。', true);
+                    return;
+                  }
+                  setSelectedRevision(Number(event.target.value));
+                }}
+              >
+                {!currentTask.plan && <option value="">尚無計畫</option>}
+                {data.plans
+                  .slice()
+                  .reverse()
+                  .map(planItem => (
+                    <option key={planItem.id || planItem.revision} value={planItem.revision}>
+                      版本 {planItem.revision}
+                    </option>
+                  ))}
+              </select>
+              <div className="plan-mode-switch" role="group" aria-label="檢視模式">
+                <button
+                  type="button"
+                  className={!isInlineEditing ? 'active' : ''}
+                  onClick={() => switchInlineMode(false)}
+                >
+                  📄 格式預覽
+                </button>
+                <button
+                  type="button"
+                  className={isInlineEditing ? 'active' : ''}
+                  onClick={() => switchInlineMode(true)}
+                >
+                  ✏️ 編輯文字
+                </button>
+              </div>
+              <button
+                type="button"
+                className="secondary plan-expand-btn"
+                onClick={() => openPlanModalWithSync(isInlineEditing ? 'edit' : 'preview')}
+              >
+                ⤢ 視窗檢視
+              </button>
+            </div>
           </div>
-          <select
-            aria-label="計畫版本"
-            value={selectedRevision ?? currentTask.plan?.revision ?? ''}
-            onChange={event => {
-              if (isDirty) {
-                notice('請先保存編輯或重新讀取當前版本。', true);
-                return;
-              }
-              setSelectedRevision(Number(event.target.value));
-            }}
-          >
-            {!currentTask.plan && <option value="">尚無計畫</option>}
+
+          {isDirty && revisionSnapshot !== currentTask.plan?.revision && (
+            <div className="info-banner">計畫已更新；未保存的編輯仍保留，請先比對新版。</div>
+          )}
+
+          {!isInlineEditing && (
+            <div
+              ref={inlinePreviewRef}
+              className="plan-document-surface"
+              onDoubleClick={() => openPlanModalWithSync('preview')}
+            >
+              {activePlanText.trim() ? (
+                <ProseContent content={activePlanText} />
+              ) : (
+                <Empty
+                  title="尚無實作計畫內容"
+                  description="點擊上方「AI 產生計畫」交由規劃 AI 擬定，或切換至「✏️ 編輯文字」手動撰寫。"
+                />
+              )}
+            </div>
+          )}
+
+          <label className="sr-only" htmlFor="plan-editor">
+            計畫內容
+          </label>
+          <textarea
+            ref={inlineEditorRef}
+            id="plan-editor"
+            className={isInlineEditing ? 'plan-editor' : 'sr-only'}
+            rows={15}
+            readOnly={!canEdit}
+            value={activePlanText}
+            placeholder="手動撰寫計畫，或交由規劃 AI 產生。"
+            onChange={event => handleDraftChange(event.target.value)}
+          />
+
+          <div className="panel-footer">
+            <span className="muted">
+              {isDirty ? '● 有未保存的編輯' : '✓ 核准的是當前已顯示版本（雙擊計畫可放大檢視）'}
+            </span>
+            <div className="button-row">
+              <button className="secondary" onClick={handleResetPlan}>
+                重新讀取當前版本
+              </button>
+              {editablePlan.includes(currentTask.status) && (
+                <button
+                  className="secondary"
+                  disabled={!canEdit || action.busy}
+                  onClick={() => void action.run(handleSavePlan)}
+                >
+                  保存計畫
+                </button>
+              )}
+            </div>
+          </div>
+        </article>
+
+        <div className="plan-side-column">
+          {discussionOpen && <PlanDiscussion key={currentTask.id} task={currentTask} plan={chosenPlan} dirty={isDirty}
+            onClose={()=>setDiscussionOpen(false)} onApplied={()=>{handleResetPlan();onChanged();}}/>}
+          <article className="panel">
+            <h2>需求</h2>
+            <ProseContent content={currentTask.description} />
+            <h3>驗收條件</h3>
+            <ProseContent content={currentTask.acceptanceCriteria} />
+          </article>
+          <article className="panel">
+            <h2>計畫版本歷史</h2>
+            {!data.plans.length && <Empty title="尚無計畫版本" />}
             {data.plans
               .slice()
               .reverse()
               .map(planItem => (
-                <option key={planItem.id || planItem.revision} value={planItem.revision}>
-                  版本 {planItem.revision}
-                </option>
+                <details className="history-item" key={planItem.id || planItem.revision}>
+                  <summary>
+                    版本 {planItem.revision} · {formatDate(planItem.createdAt)}
+                  </summary>
+                  <div className="plan-history-preview">
+                    <ProseContent content={planItem.text} />
+                  </div>
+                </details>
               ))}
-          </select>
+          </article>
         </div>
-        {isDirty && revisionSnapshot !== currentTask.plan?.revision && (
-          <div className="info-banner">計畫已更新；未保存的編輯仍保留，請先比對新版。</div>
-        )}
-        <label className="sr-only" htmlFor="plan-editor">
-          計畫內容
-        </label>
-        <textarea
-          id="plan-editor"
-          className="plan-editor"
-          rows={15}
-          readOnly={!canEdit}
-          value={draftText ?? chosenPlan?.text ?? ''}
-          placeholder="手動撰寫計畫，或交由規劃 AI 產生。"
-          onChange={event => {
-            if (!isDirty) {
-              setVersionSnapshot(currentTask.version);
-              setRevisionSnapshot(currentTask.plan?.revision ?? null);
-            }
-            setDraftText(event.target.value);
-          }}
-        />
-        <div className="panel-footer">
-          <span className="muted">
-            {isDirty ? '有未保存的編輯' : '核准的是當前已顯示版本'}
-          </span>
-          <div className="button-row">
-            <button
-              className="secondary"
-              onClick={() => {
-                setDraftText(null);
-                setSelectedRevision(null);
-                setVersionSnapshot(null);
-              }}
-            >
-              重新讀取當前版本
-            </button>
-            {editablePlan.includes(currentTask.status) && (
-              <button
-                className="secondary"
-                disabled={!canEdit || action.busy}
-                onClick={() =>
-                  void action.run(async () => {
-                    await api('/api/tasks/' + currentTask.id + '/plan', 'POST', {
-                      text: draftText ?? chosenPlan?.text ?? '',
-                      expectedVersion: versionSnapshot ?? currentTask.version,
-                    });
-                    setDraftText(null);
-                    setSelectedRevision(null);
-                    notice('計畫已保存，請核准新版本。');
-                    onChanged();
-                  })
-                }
-              >
-                保存計畫
-              </button>
+      </div>
+
+      {showModal && (
+        <Modal
+          title={currentTask.title + ' · 實作計畫'}
+          eyebrow={
+            'IMPLEMENTATION PLAN · 版本 ' +
+            (chosenPlan?.revision || currentTask.plan?.revision || '草稿')
+          }
+          wide
+          onClose={closePlanModal}
+        >
+          <div className="dialog-body plan-modal-body">
+            <div className="plan-modal-toolbar">
+              <div className="plan-modal-meta">
+                <Badge status={currentTask.status} />
+                <span className="muted">
+                  規劃 AI：{selectionText(currentTask.ai?.planning)} · 基底{' '}
+                  {shortCommit(chosenPlan?.baseCommit || currentTask.plan?.baseCommit)}
+                </span>
+              </div>
+              <div className="plan-mode-switch" role="group" aria-label="視窗計畫模式">
+                <button
+                  type="button"
+                  className={modalViewMode === 'preview' ? 'active' : ''}
+                  onClick={() => switchModalMode('preview')}
+                >
+                  📄 結構化計畫格式
+                </button>
+                {canEdit && (
+                  <button
+                    type="button"
+                    className={modalViewMode === 'edit' ? 'active' : ''}
+                    onClick={() => switchModalMode('edit')}
+                  >
+                    ✏️ 編輯計畫內容
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {modalViewMode === 'preview' ? (
+              <div ref={modalPreviewRef} className="plan-modal-document">
+                {activePlanText.trim() ? (
+                  <ProseContent content={activePlanText} />
+                ) : (
+                  <Empty title="尚無計畫內容" description="可切換至編輯模式撰寫，或關閉視窗由 AI 產生。" />
+                )}
+              </div>
+            ) : (
+              <textarea
+                ref={modalEditorRef}
+                aria-label="視窗編輯計畫內容"
+                className="plan-editor plan-modal-editor"
+                rows={20}
+                readOnly={!canEdit}
+                value={activePlanText}
+                placeholder="手動撰寫或微調計畫內容…"
+                onChange={event => handleDraftChange(event.target.value)}
+              />
             )}
           </div>
-        </div>
-      </article>
-      <div>
-        <article className="panel">
-          <h2>需求</h2>
-          <ProseContent content={currentTask.description} />
-          <h3>驗收條件</h3>
-          <ProseContent content={currentTask.acceptanceCriteria} />
-        </article>
-        <article className="panel">
-          <h2>計畫版本歷史</h2>
-          {!data.plans.length && <Empty title="尚無計畫版本" />}
-          {data.plans
-            .slice()
-            .reverse()
-            .map(planItem => (
-              <details className="history-item" key={planItem.id || planItem.revision}>
-                <summary>
-                  版本 {planItem.revision} · {formatDate(planItem.createdAt)}
-                </summary>
-                <pre>{planItem.text}</pre>
-              </details>
-            ))}
-        </article>
-      </div>
-    </div>
+          <div className="dialog-footer plan-modal-footer">
+            <span className="muted">
+              {isDirty ? '⚠️ 尚有未保存的修改，請先保存再核准' : '確認無誤後可直接核准並開始實作'}
+            </span>
+            <div className="button-row">
+              {isDirty && (
+                <button type="button" className="secondary" onClick={handleResetPlan}>
+                  放棄未保存修改
+                </button>
+              )}
+              {editablePlan.includes(currentTask.status) && isDirty && (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!canEdit || action.busy}
+                  onClick={() => void action.run(handleSavePlan)}
+                >
+                  保存計畫修改
+                </button>
+              )}
+              {currentTask.status === 'AwaitingApproval' && currentTask.plan && (
+                <button
+                  type="button"
+                  className="warning-button"
+                  disabled={isDirty || !isCurrentRevision || action.busy}
+                  onClick={() =>
+                    void action.run(async () => {
+                      await api('/api/tasks/' + currentTask.id + '/approve-plan', 'POST', {
+                        expectedVersion: currentTask.version,
+                        planRevision: currentTask.plan!.revision,
+                      });
+                      notice('計畫已核准，實作已排隊。');
+                      closePlanModal();
+                      onChanged();
+                    })
+                  }
+                >
+                  ✓ 核准計畫並開始實作
+                </button>
+              )}
+              <button type="button" className="secondary" onClick={closePlanModal}>
+                關閉
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 
@@ -458,9 +963,9 @@ function ExecutionPanel({ data }: { data: DetailData }) {
                       · {validationItem.phase}
                     </strong>
                     <p>
-                      {validationState(validationItem).label} · {validationItem.total} 個測試 ·{' '}
-                      {validationItem.failed} 個失敗
+                      {validationState(validationItem).label}{validationItem.kind==='Command'?` · 退出碼 ${validationItem.exitCode}`:` · ${validationItem.total} 個測試 · ${validationItem.failed} 個失敗`}
                     </p>
+                    {validationItem.error&&<p className="error-text">{validationItem.error}</p>}
                   </div>
                 ))}
               </div>
@@ -626,6 +1131,7 @@ function ReviewPanel({
   return (
     <>
       <AiReviewReports run={run} />
+      <TaskPreview task={currentTask} run={run} project={projects.find(p=>p.id===currentTask.projectId)} />
       <div className={isReviewable ? 'attention-banner' : 'info-banner'}>
         {isReviewable
           ? '⚡ 請先點擊「讀取差異」檢查完整程式碼變更，確認無誤後即可核准並合併回本地分支。'
@@ -817,6 +1323,7 @@ export function TaskDetail({
   const [isRetryOpen, setIsRetryOpen] = useState(false);
   const [isWorkflowOpen, setIsWorkflowOpen] = useState(false);
   const [isModelOpen, setIsModelOpen] = useState(false);
+  const [isHeaderPlanModalOpen, setIsHeaderPlanModalOpen] = useState(false);
   const notice = useNotice();
   const action = useAction(notice);
 
@@ -851,7 +1358,11 @@ export function TaskDetail({
         merges,
         events: eventsRef.current,
       };
-      if (!signal.aborted && task.status === 'Merged') {
+      if (
+        !signal.aborted &&
+        (task.status === 'Merged' ||
+          (task.status === 'Cancelled' && runs.every(runItem => Boolean(runItem.finishedAt))))
+      ) {
         cachedTerminalRef.current = detailResult;
       }
       return detailResult;
@@ -937,16 +1448,14 @@ export function TaskDetail({
             </p>
           </div>
           <div className="button-row">
-            {currentTask.status === 'Cancelled' && <button className="primary"
-              disabled={action.busy || data.runs.some(run => !run.finishedAt)}
-              onClick={() => void action.run(async () => {
-                const restarted = await api<WorkTask>('/api/tasks/' + currentTask.id + '/restart', 'POST', { expectedVersion: currentTask.version });
-                setIsRetryOpen(false); setActiveTab('plan');
-                notice(restarted.status === 'PlanningQueued' ? '任務已重新開始，規劃已排隊。' : '任務已重新開始，請確認計畫後再實作。');
-                handleChanged();
-              })}>
-              {data.runs.some(run => !run.finishedAt) ? '等待舊執行停止…' : '重新開始'}
-            </button>}
+            {currentTask.plan && (
+              <button
+                className="secondary"
+                onClick={() => setIsHeaderPlanModalOpen(true)}
+              >
+                ⤢ 檢視完整計畫
+              </button>
+            )}
             {editablePlan.includes(currentTask.status) && (
               <button
                 className="secondary"
@@ -967,7 +1476,7 @@ export function TaskDetail({
             {currentTask.status === 'AwaitingApproval' && currentTask.plan && (
               <button
                 className="warning-button"
-                disabled={isPlanDirty || action.busy || !!currentTask.plan.problem}
+                disabled={isPlanDirty || action.busy}
                 onClick={() =>
                   void action.run(async () => {
                     await api('/api/tasks/' + currentTask.id + '/approve-plan', 'POST', {
@@ -1008,6 +1517,28 @@ export function TaskDetail({
                 取消任務
               </button>
             )}
+            {currentTask.status === 'Cancelled' &&
+              (data.runs.some(runItem => !runItem.finishedAt) ? (
+                <button className="secondary" disabled>
+                  等待舊執行停止…
+                </button>
+              ) : (
+                <button
+                  className="secondary"
+                  disabled={action.busy}
+                  onClick={() =>
+                    void action.run(async () => {
+                      await api('/api/tasks/' + currentTask.id + '/restart', 'POST', {
+                        expectedVersion: currentTask.version,
+                      });
+                      notice('任務已重新開始。');
+                      handleChanged();
+                    })
+                  }
+                >
+                  重新開始
+                </button>
+              ))}
           </div>
         </div>
         <div className="meta-strip">
@@ -1023,13 +1554,12 @@ export function TaskDetail({
           <Meta label="任務版本" value={'v' + currentTask.version} />
         </div>
       </div>
-      <TaskPermissions taskId={currentTask.id} runId={data.runs.at(-1)?.id} active={currentTask.status === 'Planning' || currentTask.status === 'Running'} />
+      <TaskPermissions
+        taskId={currentTask.id}
+        runId={data.runs.at(-1)?.id}
+        active={currentTask.status === 'Planning' || currentTask.status === 'Running'}
+      />
       <TaskActivity data={data} error={detailResource.error} />
-      {currentTask.status === 'Cancelled' && <div className="info-banner">
-        {data.runs.some(run => !run.finishedAt) ? '任務已取消，正在等待舊執行停止；完成後即可重新開始。' :
-          currentTask.workflow?.planningEnabled === false ? '可按上方「重新開始」回到計畫確認。舊執行紀錄與成果保留，流程步驟會重新執行。' :
-          '可按上方「重新開始」重新規劃；新計畫仍需你核准才實作。舊執行紀錄與成果保留，流程步驟會重新執行。'}
-      </div>}
       {['Failed', 'Rejected', 'PlanningFailed'].includes(currentTask.status) && (
         <FailureRecovery
           error={
@@ -1100,7 +1630,13 @@ export function TaskDetail({
         ))}
       </div>
       <div hidden={activeTab !== 'plan'}>
-        <PlanPanel data={data} onChanged={handleChanged} onDirty={setIsPlanDirty} />
+        <PlanPanel
+          data={data}
+          onChanged={handleChanged}
+          onDirty={setIsPlanDirty}
+          modalOpenExternal={isHeaderPlanModalOpen}
+          onCloseExternalModal={() => setIsHeaderPlanModalOpen(false)}
+        />
       </div>
       <div hidden={activeTab !== 'execution'}>
         <ExecutionPanel data={data} />

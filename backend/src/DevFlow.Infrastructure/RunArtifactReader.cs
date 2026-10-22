@@ -57,7 +57,9 @@ public sealed class RunArtifactReader(string root) : IRunArtifactReader
                 var failed = json.GetProperty("Failed").GetInt32();
                 if (total < 0 || failed < 0 || failed > total) throw new ConflictException("Invalid validation counters.");
                 results.Add(new(phase, json.GetProperty("ExitCode").GetInt32(), total, failed, relative,
-                    scope.Length == 0 ? null : Guid.ParseExact(scope[5..], "N")));
+                    scope.Length == 0 ? null : Guid.ParseExact(scope[5..], "N"),
+                    json.TryGetProperty("Kind", out var kind) ? kind.GetString() ?? "DotnetTest" : "DotnetTest",
+                    json.TryGetProperty("Error", out var error) ? error.GetString() : null));
             }
             catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
             { throw new ConflictException("Validation evidence is incomplete or malformed; retry after the phase finishes."); }

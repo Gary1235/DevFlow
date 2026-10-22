@@ -97,7 +97,7 @@ public sealed class CliLoginManager(CliRegistry registry, ILoginTerminalLauncher
         foreach (var entry in sessions.Values.Where(e => e.Terminal != null))
         {
             if (entry.Terminal!.HasExited)
-                End(entry, entry.Terminal.ExitCode == 0 ? "AwaitingVerification" : "Failed", "登入終端已結束；請重新檢查登入或執行連線測試。");
+                End(entry, entry.Terminal.ExitCode == 0 ? "AwaitingVerification" : "Failed", $"登入終端已結束（exit {entry.Terminal.ExitCode}）；這不是目前帳號的驗證結果。執行任務或連線測試成功後會更新狀態。");
             else if (time.GetUtcNow() >= entry.Session.ExpiresAt) End(entry, "TimedOut", "登入逾時。", stop: true);
         }
     }

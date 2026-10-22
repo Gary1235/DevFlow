@@ -12,6 +12,19 @@ public sealed class ToolPermissionMatchingTests
     [Theory]
     [InlineData("read_file","Path","src/component.ts",true)]
     [InlineData("read_file","Path","src/component.scss",true)]
+    [InlineData("read_file","Path","frontend/src/app/sales/customer-management/components/_shared-mgt.scss",true)]
+    [InlineData("view_file","AbsolutePath","src/users/user.service.ts",true)]
+    [InlineData("read_file","Path","backend/Customers/CustomerController.cs",true)]
+    [InlineData("read_file","Path","src/customer-management/secrets.ts",false)]
+    [InlineData("read_file","Path","src/users/credentials.cs",false)]
+    [InlineData("read_file","Path","backups/component.scss",false)]
+    [InlineData("read_file","Path","exports/users/service.ts",false)]
+    [InlineData("read_file","Path","src/private/component.scss",false)]
+    [InlineData("read_file","Path","src/customer-management/client.key",false)]
+    [InlineData("view_file","AbsolutePath","src/customer-management/client.pfx",false)]
+    [InlineData("read_file","Path","src/users/customers.xlsx",false)]
+    [InlineData("read_file","Path","src/users/data.json",false)]
+    [InlineData("read_file","Path","src/users/data.unknown",false)]
     [InlineData("view_file","AbsolutePath","README.md",true)]
     [InlineData("list_dir","DirectoryPath","src",true)]
     [InlineData("find_by_name","SearchDirectory","src",true)]
@@ -34,6 +47,24 @@ public sealed class ToolPermissionMatchingTests
         Assert.Equal(general,risk.BatchAllowed); Assert.False(string.IsNullOrEmpty(risk.Reason));
         Assert.Equal(general,ToolPermissionMatching.Matches(Batch(),project,task,tool,args,root,"codex"));
         Assert.Equal(general,ToolPermissionMatching.Options(tool,args,root).Length>0);
+    }
+    [Theory]
+    [InlineData("client.pem","金鑰／憑證")]
+    [InlineData("client.KEY","金鑰／憑證")]
+    [InlineData("password-vault.kdbx","機敏資料")]
+    [InlineData("records.accdb","資料庫／備份")]
+    [InlineData("records.db3","資料庫／備份")]
+    [InlineData("records.csv","資料／匯出檔")]
+    [InlineData("records.parquet","資料／匯出檔")]
+    [InlineData("records.jsonl","資料／匯出檔")]
+    public void File_type_has_a_specific_reason_and_cannot_use_general_read_rules(string filename,string label)
+    {
+        var args=JsonSerializer.SerializeToElement(new{Path=Path.Combine(root,"src","customer-management",filename)});
+        var risk=PermissionRisk.Assess("read_file",args,root);
+        Assert.Equal("SensitiveRead",risk.Category);
+        Assert.Contains(label,risk.Label);
+        Assert.False(risk.BatchAllowed);
+        Assert.False(ToolPermissionMatching.Matches(Batch(),project,task,"read_file",args,root,"antigravity"));
     }
     [Theory]
     [InlineData("read_database","SensitiveRead")]

@@ -18,9 +18,13 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
         project = new(Guid.NewGuid(), "Test", root, "main", ["test"]); await store.AddProjectAsync(project);
     }
     public Task DisposeAsync() { Directory.Delete(root, true); return Task.CompletedTask; }
-    private sealed class NativeFixture(string provider, bool turnGrant = false) : IProcessRunner, IInteractiveProcessRunner
+    private sealed class NativeFixture(string provider, bool turnGrant = false, string commandText = "git diff --stat", string? toolName = null, object? toolInput = null) : IProcessRunner, IInteractiveProcessRunner
     {
+        public string? ToolName { get; } = toolName;
+        public object? ToolInput { get; } = toolInput;
+        public string CommandText {get;}=commandText;
         public bool TurnGrant { get; } = turnGrant;
+        public CancellationTokenSource Exited { get; } = new();
         public List<JsonElement> Sent { get; } = [];
         public List<string[]> Arguments { get; } = [];
         public Task<ProcessResult> RunAsync(string e, IReadOnlyList<string> a, string cwd, string? input, CancellationToken ct) => throw new InvalidOperationException("Must use native duplex protocol.");
@@ -31,6 +35,7 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
         }
         private sealed class Session(NativeFixture owner, string provider, string cwd) : IProcessSession
         {
+            public CancellationToken ProcessExited => owner.Exited.Token;
             private readonly Channel<JsonElement> frames = Channel.CreateUnbounded<JsonElement>();
             private void Frame(object value) => frames.Writer.TryWrite(JsonSerializer.SerializeToElement(value));
             private string Plan => provider == "codex" ? "{\"plan\":\"Update shipment layout and run npm run build.\"}" : "Update shipment layout and run npm run build.";
@@ -47,7 +52,7 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
                     {
                         Frame(new { id = 3, result = new { turn = new { id = "turn", status = "inProgress" } } });
                         if(owner.TurnGrant) Frame(new {id=90,method="item/permissions/requestApproval",@params=new{threadId="thread",turnId="turn",permissions=new{network=true}}});
-                        else Frame(new { id = 90, method = "item/commandExecution/requestApproval", @params = new { threadId = "thread", turnId = "turn", itemId = "command", command = "git diff --stat", cwd } });
+                        else Frame(new { id = 90, method = "item/commandExecution/requestApproval", @params = new { threadId = "thread", turnId = "turn", itemId = "command", command = owner.CommandText, cwd } });
                     }
                     if (method is null && json.TryGetProperty("id", out var id) && id.GetInt32() == 90)
                     {
@@ -59,7 +64,7 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
                 {
                     var type = json.GetProperty("type").GetString();
                     if (type == "control_request") Frame(new { type = "control_response", response = new { subtype = "success", request_id = "devflow-initialize", response = new { } } });
-                    if (type == "user") Frame(new { type = "control_request", request_id = "native-request", request = new { subtype = "can_use_tool", tool_name = "Bash", input = new { command = "git diff --stat" } } });
+                    if (type == "user") Frame(new { type = "control_request", request_id = "native-request", request = new { subtype = "can_use_tool", tool_name = owner.ToolName ?? "Bash", input = owner.ToolInput ?? new { command = owner.CommandText } } });
                     if (type == "control_response") Frame(new { type = "result", subtype = "success", is_error = false, result = Plan });
                 }
                 if (provider == "gemini")
@@ -68,7 +73,7 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
                     if (method == "session/new") Frame(new { jsonrpc = "2.0", id = 2, result = new { sessionId = "session" } });
                     if (method == "session/prompt")
                     {
-                        Frame(new { method = "session/update", @params = new { sessionId = "session", update = new { sessionUpdate = "tool_call", toolCallId = "tool", name = "run_shell_command", kind = "execute", rawInput = new { command = "git diff --stat" } } } });
+                        Frame(new { method = "session/update", @params = new { sessionId = "session", update = new { sessionUpdate = "tool_call", toolCallId = "tool", name = owner.ToolName ?? "run_shell_command", kind = owner.ToolName is null ? "execute" : "search", rawInput = owner.ToolInput ?? new { command = owner.CommandText } } } });
                         Frame(new { id = 90, method = "session/request_permission", @params = new { sessionId = "session", toolCall = new { toolCallId = "tool" }, options = new[] { new { optionId = "once", kind = "allow_once" }, new { optionId = "never", kind = "reject_once" }, new { optionId = "always", kind = "allow_always" } } } });
                     }
                     if (method is null && json.TryGetProperty("id", out var id) && id.GetInt32() == 90)
@@ -89,6 +94,39 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
             if (request is not null) return request; await Task.Delay(10);
         }
         throw new TimeoutException("No unified approval request.");
+    }
+    [Theory]
+    [InlineData("claude", "Glob")][InlineData("claude", "Grep")]
+    [InlineData("gemini", "glob")][InlineData("gemini", "list_directory")][InlineData("gemini", "grep_search")]
+    public async Task Native_search_protocols_auto_approve_the_same_worktree_scope(string provider, string tool)
+    {
+        var task=WorkTask.Create(project.Id,"Feature","Build","Test") with {Ai=new(new(provider),new(provider))};
+        await store.AddTaskAsync(task);await store.QueuePlanningAsync(task.Id,task.Version);var claim=(await store.ClaimPlanningAsync())!;
+        object input=provider=="claude"?new{pattern="synthetic"}:(object)new{pattern="synthetic",dir_path=root};
+        var process=new NativeFixture(provider,toolName:tool,toolInput:input);
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await Runner(provider,process).PlanAsync(claim.Task,new(root,"base"),claim.Run.Id,timeout.Token);
+        var approval=Assert.Single(await store.ListToolApprovalsAsync(task.Id));
+        Assert.Equal("AllowedByPolicy",approval.State);
+        if(provider=="claude") {
+            var reply=Assert.Single(process.Sent,x=>x.TryGetProperty("type",out var t)&&t.GetString()=="control_response");
+            var response=reply.GetProperty("response").GetProperty("response");
+            Assert.Equal("allow",response.GetProperty("behavior").GetString());
+            Assert.Equal(root,response.GetProperty("updatedInput").GetProperty("path").GetString());
+        }
+    }
+    [Theory][InlineData("codex")][InlineData("claude")][InlineData("gemini")]
+    public async Task Implementation_cli_reuses_exact_project_validation_grants(string provider)
+    {
+        await store.SetExecutionSettingsAsync(project.Id, 0, [new("build", "Build", ".", "dotnet", ["build"])], "build", [], null);
+        var task=WorkTask.Create(project.Id,"Feature","Implement","Validate").SetPlan("Implement changes and run tests.").ApprovePlan() with { Ai=new(new(provider),new(provider)) };
+        await store.AddTaskAsync(task);var claim=(await store.ClaimNextAsync())!;
+        var process=new NativeFixture(provider,commandText:"dotnet build");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await Runner(provider,process).ExecuteAsync(claim.Task,new(root,"base"),claim.Run.Id,TddPhase.Implementation,timeout.Token);
+        var approval=Assert.Single(await store.ListToolApprovalsAsync(task.Id));
+        Assert.Equal("AllowedByPolicy",approval.State);Assert.Equal("Execution",approval.Risk.Category);
+        Assert.Contains("build",approval.Risk.Reason);Assert.Contains("專案版本 1",approval.Risk.Reason);
     }
     private RoutedCliRunner Runner(string provider, NativeFixture process)
     {
@@ -144,6 +182,45 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
         var running=Runner(provider,process).PlanAsync(claim.Task,new(root,"base"),claim.Run.Id,cancellation.Token);
         await Pending(task.Id);cancellation.Cancel();await Assert.ThrowsAnyAsync<OperationCanceledException>(()=>running);
         Assert.Equal("Expired",(await store.ListToolApprovalsAsync(task.Id)).Single().State);
+    }
+    [Theory] [InlineData("codex")] [InlineData("claude")] [InlineData("gemini")]
+    public async Task Native_CLI_exit_invalidates_pending_web_approval_without_waiting_for_a_web_deadline(string provider)
+    {
+        var task=WorkTask.Create(project.Id,"Feature","Build","Test") with {Ai=new(new(provider),new(provider))};
+        await store.AddTaskAsync(task);await store.QueuePlanningAsync(task.Id,task.Version);var claim=(await store.ClaimPlanningAsync())!;
+        var process=new NativeFixture(provider);using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var running=Runner(provider,process).PlanAsync(claim.Task,new(root,"base"),claim.Run.Id,timeout.Token);
+        var pending=await Pending(task.Id);Assert.Null(pending.ExpiresAt);
+        process.Exited.Cancel();
+        var error=await Assert.ThrowsAsync<InvalidOperationException>(()=>running);
+        Assert.Contains("CliInterrupted",error.Message);Assert.False(timeout.IsCancellationRequested);
+        Assert.Equal("Expired",(await store.ListToolApprovalsAsync(task.Id)).Single().State);
+        await Assert.ThrowsAsync<ConflictException>(()=>store.ReplyToolApprovalAsync(task.Id,pending.Id,claim.Run.Id,true));
+    }
+    [Theory][InlineData("codex")][InlineData("gemini")]
+    public async Task Unknown_shell_read_requests_reach_shared_policy_without_keyword_based_readonly_denial(string provider)
+    {
+        var task=WorkTask.Create(project.Id,"Feature","Build","Test") with {Ai=new(new(provider),new(provider))};
+        await store.AddTaskAsync(task);await store.QueuePlanningAsync(task.Id,task.Version);var claim=(await store.ClaimPlanningAsync())!;
+        var process=new NativeFixture(provider,commandText:"Select-String -Pattern 'please delete file' -Path src/a.json -Culture en-US");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var running=Runner(provider,process).PlanAsync(claim.Task,new(root,"base"),claim.Run.Id,timeout.Token);
+        var pending=await Pending(task.Id);
+        Assert.Equal("unknown",pending.Arguments.GetProperty("Shell").GetString());Assert.True(pending.Risk.FixedBoundary);
+        await store.ReplyToolApprovalAsync(task.Id,pending.Id,claim.Run.Id,true);await running;
+    }
+    [Fact] public async Task Bash_service_command_never_inherits_PowerShell_alias_auto_approval()
+    {
+        if(!OperatingSystem.IsWindows())return;
+        var task=WorkTask.Create(project.Id,"Feature","Build","Test").SetPlan("Implement changes.").ApprovePlan() with {Ai=new(new("claude"),new("claude"))};
+        await store.AddTaskAsync(task);var claim=(await store.ClaimNextAsync())!;
+        var process=new NativeFixture("claude",commandText:"sc stop Spooler");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var running=Runner("claude",process).ExecuteAsync(claim.Task,new(root,"base"),claim.Run.Id,TddPhase.Implementation,timeout.Token);
+        var pending=await Pending(task.Id);Assert.False(pending.Risk.AutoAllowed);
+        Assert.Equal("bash",pending.Arguments.GetProperty("Shell").GetString());
+        await store.ReplyToolApprovalAsync(task.Id,pending.Id,claim.Run.Id,false);
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>running);
     }
     [Fact] public async Task Turn_wide_native_permission_grants_are_never_presented_as_single_use()
     {

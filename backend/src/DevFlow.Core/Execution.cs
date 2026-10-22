@@ -3,7 +3,8 @@ namespace DevFlow.Core;
 public enum TddPhase { Baseline, Red, Green, Refactor, Implementation }
 public sealed record Workspace(string Path, string BaseCommit);
 public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-public sealed record ValidationEvidence(int ExitCode, int Total, int Failed, string[] PassedTests, string[] FailedTests);
+public sealed record ValidationEvidence(int ExitCode, int Total, int Failed, string[] PassedTests, string[] FailedTests,
+    string Kind = "DotnetTest", string? Error = null);
 public interface IAgentRunner
 {
     Task ExecuteAsync(WorkTask task, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct);
@@ -67,7 +68,8 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
             var baseline = await validation.ValidateAsync(project, workspace, claim.Run.Id, TddPhase.Baseline, ct);
             List<string> validationSummary = [$"Baseline: exit {baseline.ExitCode}, total {baseline.Total}, failed {baseline.Failed}"];
             if (baseline.ExitCode != 0 || baseline.Failed != 0)
-                throw new InvalidOperationException("Baseline validation failed; fix existing failures before starting TDD.");
+                throw new InvalidOperationException("Baseline validation failed: " + (baseline.Error ?? "fix existing failures before starting TDD; see validation logs."));
+            if (claim.Task.Policy?.Tdd != false && baseline.Kind != "DotnetTest") throw new InvalidOperationException("TDD 需要 DotnetTest 逐項測試結果；一般指令請使用標準實作模式。");
             await store.AppendEventAsync(claim.Task.Id, "PhaseVerified", TddPhase.Baseline.ToString(), ct);
             string[] redTests = [];
             var policy = claim.Task.Policy ?? new ExecutionPolicy();
@@ -90,7 +92,7 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
                         throw new InvalidOperationException("Red phase requires actual failing tests in a TRX report; build errors do not qualify.");
                     redTests = evidence.FailedTests;
                 }
-                else if (evidence.ExitCode != 0 || evidence.Total == 0 || evidence.Failed != 0 ||
+                else if (evidence.ExitCode != 0 || (evidence.Kind == "DotnetTest" && evidence.Total == 0) || evidence.Failed != 0 ||
                     baseline.PassedTests.Except(evidence.PassedTests, StringComparer.Ordinal).Any() ||
                     redTests.Except(evidence.PassedTests, StringComparer.Ordinal).Any())
                     throw new InvalidOperationException($"{phase} must pass, including every test that failed during Red.");

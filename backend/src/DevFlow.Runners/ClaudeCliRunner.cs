@@ -48,6 +48,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
     }
     private async Task<string> Invoke(WorkTask task, Workspace workspace, Guid runId, string phase, bool planning, string instruction, CancellationToken ct)
     {
+        workspace = workspace with { Path = Path.GetFullPath(workspace.Path) };
         var selection = AiSelection.Normalize(planning ? task.Ai?.Planning : task.Ai?.Implementation);
         var prompt = $"""
             DevFlow phase: {phase}
@@ -57,7 +58,7 @@ public sealed class ClaudeCliRunner(IProcessRunner process, string executable, s
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}
-            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation")}
+            {TaskInstructions.For(task, planning ? task.ReadOnlyInstruction is null ? "Planning" : "Discussion" : "Implementation", workspace.Path)}
             """;
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N")); Directory.CreateDirectory(directory);
         await File.WriteAllTextAsync(Path.Combine(directory, phase + "-prompt.txt"), prompt, ct);

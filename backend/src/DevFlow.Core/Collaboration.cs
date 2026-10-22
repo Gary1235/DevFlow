@@ -22,7 +22,8 @@ public sealed record ExecutionPolicy(bool Tdd = true, string[]? AllowedPaths = n
     }
 }
 public sealed record WorkflowStep(Guid Id, string Name, string Kind = "Implementation", AiSelection? Selection = null,
-    string? Instructions = null, string[]? AllowedPaths = null, bool WaitForApproval = false, string? AcceptanceCriteria = null);
+    string? Instructions = null, string[]? AllowedPaths = null, bool WaitForApproval = false, string? AcceptanceCriteria = null,
+    string? ValidationProfileId = null);
 public sealed record WorkflowTemplate(string Name, WorkflowDefinition Workflow);
 public sealed record WorkflowStepResult(Guid StepId, string Name, string Kind, string State, Guid RunId,
     string? ResultCommit, string? Summary, AiSelection? Selection, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt = null);
@@ -45,6 +46,7 @@ public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection
                 if (s.Kind is not ("Implementation" or "Review" or "Validation" or "Approval"))
                     throw new ArgumentException("不支援的流程步驟類型。");
                 return s with { Name = WorkTask.Required(s.Name, 100),
+                    ValidationProfileId = string.IsNullOrWhiteSpace(s.ValidationProfileId) ? null : WorkTask.Required(s.ValidationProfileId, 60),
                     AcceptanceCriteria = string.IsNullOrWhiteSpace(s.AcceptanceCriteria) ? null : WorkTask.Required(s.AcceptanceCriteria, 12000),
                     Instructions = string.IsNullOrWhiteSpace(s.Instructions) ? null : WorkTask.Required(s.Instructions, 12000),
                     Selection = s.Kind is "Implementation" or "Review" ? AiSelection.Normalize(s.Selection) : null,
@@ -56,16 +58,23 @@ public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection
     }
 }
 public sealed record AiAcceptanceReport(Guid Id, int Attempt, int Stage, AiSelection Selection, string ResultCommit, string Verdict, string Summary, DateTimeOffset CreatedAt);
-public sealed record DiscussionMessage(Guid Id, string Role, string Content, DateTimeOffset CreatedAt, AiSelection? Selection = null, string? BaseCommit = null, Guid? OperationId = null);
+public sealed record PlanDiscussionContext(int TaskVersion, int Revision, string Text, string? BaseCommit,
+    string Requirements, string AcceptanceCriteria, string? TaskRules = null);
+public sealed record DiscussionMessage(Guid Id, string Role, string Content, DateTimeOffset CreatedAt, AiSelection? Selection = null, string? BaseCommit = null, Guid? OperationId = null,
+    PlanDiscussionContext? PlanContext = null, string? ProposedPlan = null);
 public sealed record DiscussionDraft(Guid Id, string Title, string Description, string AcceptanceCriteria, string? TaskRules = null,
     string[]? AllowedPaths = null, Guid[]? RuleIds = null, string[]? OpenQuestions = null, Guid? CreatedTaskId = null, int SourceVersion = 0);
 public sealed record Discussion(Guid Id, Guid ProjectId, string Title, AiSelection Selection, RuleSnapshot[] Rules,
     DiscussionMessage[] Messages, DiscussionDraft[] Drafts, int Version, DateTimeOffset UpdatedAt,
-    Guid? ActiveOperation = null, string? Error = null, bool AutoTitle = false, Guid? LastOperationId = null);
+    Guid? ActiveOperation = null, string? Error = null, bool AutoTitle = false, Guid? LastOperationId = null, Guid? PlanTaskId = null);
 
 public static class TaskInstructions
 {
-    public static string For(WorkTask task, string stage) =>
+    public static string For(WorkTask task, string stage, string? workspace = null) =>
+        (workspace is null ? "" : "Designated task worktree (the only default authorized project directory): " + workspace +
+            "\nUse paths relative to this worktree. The original checkout, DevFlow source/install directories and other tasks' worktrees are outside this boundary. " +
+            "Do not leave this worktree to inspect DevFlow permission hooks or change tools/commands to bypass a denied operation. " +
+            "If a required operation is blocked, report the exact tool, target and reason to the user. Request explicit additional access when necessary; otherwise continue only within the designated worktree.\n") +
         "Applicable rule snapshots:\n" + string.Join("\n\n", (task.Rules ?? []).Where(r => r.Stages.Contains(stage))
             .Select(r => $"[{r.Name} v{r.Version}]\n{r.Content}")) +
         "\nTask-specific rules:\n" + task.TaskRules +

@@ -58,6 +58,8 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, I
                 RunId TEXT NOT NULL REFERENCES Runs(Id), Payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_ToolApprovals_Task ON ToolApprovals(TaskId);
             CREATE TABLE IF NOT EXISTS ToolPermissionRules(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS PermissionPolicies(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS CliVerifications(Provider TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             """);
         var tdd = new RuleDefinition(Guid.Parse("90d978ec-8485-4e0c-a90d-31a333881955"), "TDD 模式",
             "依序執行 Baseline、Red、Green、Refactor；保留既有測試，不得刪除、略過或弱化斷言。Red 必須有實際失敗測試，後續階段必須通過。",

@@ -13,6 +13,6 @@ public sealed record MergeTaskRequest(Guid RunId, string ResultCommit, string Ex
 public sealed record GeneratePlanRequest(int ExpectedVersion);
 public sealed record RestartTaskRequest(int ExpectedVersion);
 public sealed record ApprovePlanRequest(int ExpectedVersion, int PlanRevision);
-public sealed record SetWorkflowRequest(int ExpectedVersion, WorkflowDefinition Workflow);
+public sealed record SetWorkflowRequest(int ExpectedVersion, WorkflowDefinition Workflow, AiSelection? PlanningSelection = null);
 public sealed record ContinueWorkflowRequest(int ExpectedVersion, string? Instructions = null);
 public sealed record SetTaskModelRequest(int ExpectedVersion, string Stage, AiSelection Selection);

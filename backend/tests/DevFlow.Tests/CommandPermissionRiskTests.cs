@@ -11,7 +11,36 @@ public sealed class CommandPermissionRiskTests : IDisposable
     public void Dispose()=>Directory.Delete(root,true);
     private PermissionAssessment Risk(string command)=>PermissionRisk.Assess("run_command",JsonSerializer.SerializeToElement(new{CommandLine=command}),root);
     [Theory]
+    [InlineData("Get-Content src/customer-management/component.scss", "GeneralRead")]
+    [InlineData("Select-String -Path src/users/user.service.ts -Pattern customer", "GeneralRead")]
+    [InlineData("git diff --no-ext-diff --no-textconv -- src/customers/Controller.cs", "GeneralRead")]
+    [InlineData("Get-Content src/customer-management/secrets.ts", "SensitiveRead")]
+    [InlineData("Get-Content src/customer-management/client.pem", "SensitiveRead")]
+    [InlineData("Get-Content src/customer-management/records.csv", "SensitiveRead")]
+    [InlineData("Get-Content src/users/data.json", "SensitiveRead")]
+    [InlineData("Get-Content exports/users/Controller.cs", "SensitiveRead")]
+    [InlineData("Get-Content src/customer-management/component.scss > copied.scss", "Write")]
+    [InlineData("Set-Content src/customer-management/component.scss changed", "Write")]
+    [InlineData("Remove-Item src/customer-management/component.scss", "Deletion")]
+    public void Commands_combine_operation_file_type_and_path(string command,string category)
+    {
+        var risk=Risk(command);
+        Assert.Equal(category,risk.Category);
+        Assert.Equal(category=="GeneralRead",risk.BatchAllowed);
+    }
+    [Fact]
+    public void Code_search_allows_business_features_but_rechecks_sensitive_files_inside_them()
+    {
+        var feature=Path.Combine(root,"src","customer-management");
+        Directory.CreateDirectory(feature);
+        File.WriteAllText(Path.Combine(feature,"component.scss"),".customer {}");
+        Assert.True(Risk("rg --glob '*.scss' customer src").BatchAllowed);
+        File.WriteAllText(Path.Combine(feature,"secrets.scss"),".secret {}");
+        Assert.False(Risk("rg --glob '*.scss' customer src").BatchAllowed);
+    }
+    [Theory]
     [InlineData("Get-ChildItem -Force")]
+    [InlineData("dir")]
     [InlineData("Get-ChildItem -Path backend -Recurse -File -Name")]
     [InlineData("Get-ChildItem -LiteralPath backend -Depth 3 -Directory")]
     [InlineData("Get-Content -Path backend/source.cs -Raw")]
@@ -58,6 +87,9 @@ public sealed class CommandPermissionRiskTests : IDisposable
     [InlineData("git -c core.pager=whoami status")]
     [InlineData("git diff --no-ext-diff --no-textconv --output=result.txt")]
     [InlineData("powershell -Command Get-ChildItem")]
+    [InlineData("dir ../")]
+    [InlineData("dir /s")]
+    [InlineData("dir -FollowSymlink")]
     public void Shell_composition_interpreters_and_unknown_switches_never_batch_allow(string command)=>Assert.False(Risk(command).BatchAllowed);
     [Fact] public void Search_globs_cannot_hide_sensitive_source_names()
     {
@@ -68,5 +100,14 @@ public sealed class CommandPermissionRiskTests : IDisposable
     {
         foreach(var args in new[]{JsonSerializer.SerializeToElement(new{CommandLine="Get-ChildItem -Force",Cwd=Path.GetTempPath()}),JsonSerializer.SerializeToElement(new{CommandLine="Get-ChildItem -Force",AdditionalPermissions=new{network=true}}),JsonSerializer.SerializeToElement(new{CommandLine="Get-ChildItem -Force",Kind="stdin"})})
             Assert.False(PermissionRisk.Assess("run_command",args,root).BatchAllowed);
+    }
+    [Fact] public void Bare_dir_is_scoped_to_workspace_and_custom_sensitive_command_rules_still_win()
+    {
+        var outside=JsonSerializer.SerializeToElement(new{CommandLine="dir",Cwd=Path.GetTempPath()});
+        Assert.False(PermissionRisk.Assess("run_command",outside,root).BatchAllowed);
+        Assert.False(PermissionPolicy.Assess(PermissionPolicySettings.Defaults,"run_command",outside,root).AutoAllowed);
+        var inside=JsonSerializer.SerializeToElement(new{CommandLine="dir",Cwd=root});
+        Assert.True(PermissionPolicy.Assess(PermissionPolicySettings.Defaults,"run_command",inside,root).AutoAllowed);
+        Assert.False(PermissionPolicy.Assess(new(SensitiveCommands:["dir"]),"run_command",inside,root).AutoAllowed);
     }
 }

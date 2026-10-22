@@ -5,6 +5,7 @@ public sealed class CodexPlanningRunner(IProcessRunner process, string executabl
 {
     public async Task<string> PlanAsync(WorkTask task, Workspace workspace, Guid runId, CancellationToken ct)
     {
+        workspace = workspace with { Path = Path.GetFullPath(workspace.Path) };
         var directory = Path.Combine(Path.GetFullPath(artifactsRoot), runId.ToString("N"));
         Directory.CreateDirectory(directory);
         var prefix = task.ArtifactStage;
@@ -17,7 +18,7 @@ public sealed class CodexPlanningRunner(IProcessRunner process, string executabl
             {task.ReadOnlyInstruction ?? "Analyze this repository and produce an implementation plan for human approval. Describe contracts, affected files, meaningful tests, steps, validation, risks and unresolved questions." + PlanContent.CompletionInstruction}
             Read repository instructions and source files. Do not edit files, commit, merge, push, or implement the task.
             Use the requested JSON schema; put your complete response in the plan string.
-            {TaskInstructions.For(task, task.ReadOnlyInstruction is null ? "Planning" : "Discussion")}
+            {TaskInstructions.For(task, task.ReadOnlyInstruction is null ? "Planning" : "Discussion", workspace.Path)}
             Title: {task.Title}
             Description: {task.Description}
             Acceptance criteria: {task.AcceptanceCriteria}

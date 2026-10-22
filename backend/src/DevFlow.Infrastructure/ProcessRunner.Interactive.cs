@@ -16,11 +16,16 @@ public sealed partial class ProcessRunner
             StandardInputEncoding = new UTF8Encoding(false), StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
         foreach (var arg in arguments) info.ArgumentList.Add(arg);
         using var process = Process.Start(info) ?? throw new InvalidOperationException("CLI process did not start.");
+        using var exited = new CancellationTokenSource();
+        EventHandler onExit = (_, _) => exited.Cancel();
+        process.EnableRaisingEvents = true;
+        process.Exited += onExit;
+        if (process.HasExited) exited.Cancel();
         var id = Guid.NewGuid(); var activity = ProcessOutput.ActivityObserver;
         var semantic = new ToolActivityParser(summary => activity?.Invoke(new(id, executable, "Work", Summary: summary)));
         activity?.Invoke(new(id, executable, "Started"));
         var error = ReadBoundedAsync(process.StandardError, onRead: n => activity?.Invoke(new(id, executable, "Output", n)));
-        var session = new JsonSession(process.StandardInput, process.StandardOutput, line => {
+        var session = new JsonSession(process.StandardInput, process.StandardOutput, exited.Token, line => {
             activity?.Invoke(new(id, executable, "Output", line.Length)); semantic.Append(line + "\n"); ProcessOutput.Observer?.Invoke(line + "\n");
         });
         try
@@ -38,10 +43,11 @@ public sealed partial class ProcessRunner
             await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
             await error.WaitAsync(TimeSpan.FromSeconds(5)); throw;
         }
-        finally { semantic.Finish(); activity?.Invoke(new(id, executable, "Finished", ExitCode: process.HasExited ? process.ExitCode : null)); }
+        finally { process.Exited -= onExit; semantic.Finish(); activity?.Invoke(new(id, executable, "Finished", ExitCode: process.HasExited ? process.ExitCode : null)); }
     }
-    private sealed class JsonSession(StreamWriter input, StreamReader output, Action<string> observe) : IProcessSession
+    private sealed class JsonSession(StreamWriter input, StreamReader output, CancellationToken processExited, Action<string> observe) : IProcessSession
     {
+        public CancellationToken ProcessExited => processExited;
         private readonly StringBuilder retained = new();
         private readonly char[] buffer = new char[4096];
         private int position, available;

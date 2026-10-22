@@ -1,0 +1,6 @@
+.execution-settings{display:grid;gap:16px;min-width:0}.execution-settings .execution-config{display:grid;gap:12px;border:1px solid var(--border,#d6deea);border-radius:10px;padding:16px;min-width:0}.execution-settings label{min-width:0}.execution-settings input,.execution-settings select,.execution-settings textarea{max-width:100%;box-sizing:border-box}.task-preview{margin:16px 0}.task-preview .preview-services{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.task-preview .preview-log{max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f7fb;border:1px solid #d6deea;border-radius:8px;padding:12px}.task-preview .preview-identity{overflow-wrap:anywhere}.execution-config legend{font-weight:600}
+dialog:has(>.project-settings-form)[open]{display:flex;flex-direction:column;height:92vh;overflow:hidden}
+dialog:has(>.project-settings-form)>.dialog-heading{flex-shrink:0}
+.project-settings-form{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.project-settings-form>.dialog-body{flex:1;min-height:0;max-height:none;overflow:auto}
+.project-settings-form>.dialog-footer{flex-shrink:0}

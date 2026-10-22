@@ -74,13 +74,13 @@ public sealed partial class SqliteTaskStore
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
     }
 
-    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct, AiSelection? selection = null)
+    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct, AiSelection? selection = null, PlanDiscussionContext? planContext = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
         if (d.Version != expectedVersion || d.ActiveOperation is not null) throw new ConflictException("Discussion changed or an AI reply is still running. Refresh before retrying.");
         if (d.Messages.Sum(m => m.Content.Length) > 120000) throw new ArgumentException("This discussion is too long. Start a new discussion with a summary.");
-        var messages = message is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "user", WorkTask.Required(message, 20000), DateTimeOffset.UtcNow)];
+        var messages = message is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "user", WorkTask.Required(message, 20000), DateTimeOffset.UtcNow, PlanContext: planContext)];
         var title = d.AutoTitle && d.Messages.Length == 0 && message is not null
             ? SummarizeDiscussionTitle(message)
             : d.Title;
@@ -89,12 +89,13 @@ public sealed partial class SqliteTaskStore
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
     }
 
-    public Task<Discussion> FinishDiscussionAsync(Guid id, Guid operation, string? reply, string? baseCommit, DiscussionDraft[]? drafts, string? error, CancellationToken ct)
+    public Task<Discussion> FinishDiscussionAsync(Guid id, Guid operation, string? reply, string? baseCommit, DiscussionDraft[]? drafts, string? error, CancellationToken ct,
+        PlanDiscussionContext? planContext = null, string? proposedPlan = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
         if (d.ActiveOperation != operation) throw new ConflictException("Discussion operation is no longer active.");
-        var messages = reply is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "assistant", reply, DateTimeOffset.UtcNow, d.Selection, baseCommit, operation)];
+        var messages = reply is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "assistant", reply, DateTimeOffset.UtcNow, d.Selection, baseCommit, operation, planContext, proposedPlan)];
         var updated = d with { Messages = messages, Drafts = drafts is null ? d.Drafts : [..d.Drafts, ..drafts], Error = error,
             ActiveOperation = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);

@@ -27,11 +27,19 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
             _ => throw new ArgumentException("Unsupported permission protocol.")
         };
     }
-    private async Task<bool> Ask(string tool, JsonElement args, string cwd, CancellationToken ct)
+    private async Task<bool> Ask(string tool, JsonElement args, string cwd, CancellationToken ct, IProcessSession session)
     {
         var normalized = PermissionTools.Normalize(provider, tool, args, cwd);
-        if (operation.ReadOnly && PermissionRisk.Assess(normalized.Tool,normalized.Arguments,cwd).Category is "Write" or "Deletion") return false;
-        return await operation.RequestPermissionAsync(normalized.Tool, normalized.Arguments, cwd, ct);
+        if (operation.ReadOnly && PermissionPolicy.Assess(PermissionPolicySettings.Defaults,normalized.Tool,normalized.Arguments,cwd,readOnly:true).Category is "Write" or "Deletion") return false;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, session.ProcessExited);
+        bool allowed;
+        try { allowed = await operation.RequestPermissionAsync(normalized.Tool, normalized.Arguments, cwd, lifetime.Token); }
+        catch (OperationCanceledException) when (session.ProcessExited.IsCancellationRequested && !ct.IsCancellationRequested) {
+            throw new InvalidOperationException("[CliInterrupted] CLI 已結束，工具確認通道已中斷；此次沒有取得核准。");
+        }
+        if (session.ProcessExited.IsCancellationRequested && !ct.IsCancellationRequested)
+            throw new InvalidOperationException("[CliInterrupted] CLI 已結束，工具確認通道已中斷；此次沒有取得核准。");
+        return allowed;
     }
     private static async Task<JsonElement> Read(IProcessSession session, CancellationToken ct) =>
         await session.ReadAsync(ct) ?? throw new InvalidOperationException("CLI 在完成前結束權限對話。");
@@ -95,14 +103,14 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                         var commandPayload = JsonNode.Parse(p.GetRawText())!.AsObject();
                         if (Text(p,"itemId") is { } commandId && items.TryGetValue(commandId,out var commandItem))
                             foreach (var key in new[]{"command","cwd"}) if (commandPayload[key] is null && commandItem.TryGetProperty(key,out var value)) commandPayload[key]=JsonNode.Parse(value.GetRawText());
-                        var allowed = await Ask("commandExecution", JsonSerializer.SerializeToElement(commandPayload), cwd, token);
+                        var allowed = await Ask("commandExecution", JsonSerializer.SerializeToElement(commandPayload), cwd, token, s);
                         decision = new { decision = allowed ? "accept" : "decline" };
                     }
                     else if (name == "item/fileChange/requestApproval")
                     {
                         var payload = JsonNode.Parse(p.GetRawText())!.AsObject();
                         if (Text(p, "itemId") is { } itemId && items.TryGetValue(itemId, out var item) && item.TryGetProperty("changes", out var changes)) payload["changes"] = JsonNode.Parse(changes.GetRawText());
-                        decision = new { decision = await Ask("fileChange", JsonSerializer.SerializeToElement(payload), cwd, token) ? "accept" : "decline" };
+                        decision = new { decision = await Ask("fileChange", JsonSerializer.SerializeToElement(payload), cwd, token, s) ? "accept" : "decline" };
                     }
                     else if (name == "item/permissions/requestApproval")
                     {
@@ -155,7 +163,8 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                     var request = Object(frame, "request"); object response;
                     if (Text(request, "subtype") == "can_use_tool" && Text(request, "tool_name") is { } tool)
                     {
-                        var input = Object(request, "input"); var allowed = await Ask(tool, input, cwd, token);
+                        var input = PermissionTools.BindWorkspace(provider, tool, Object(request, "input"), cwd);
+                        var allowed = await Ask(tool, input, cwd, token, s);
                         response = allowed ? new { behavior = "allow", updatedInput = (object)input } : (object)new { behavior = "deny", message = "DevFlow 未核准本次操作。", interrupt = false };
                     }
                     else response = new { behavior = "deny", message = "Unsupported permission request" };
@@ -208,7 +217,7 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                     var input = merged["rawInput"] is JsonObject raw ? JsonSerializer.SerializeToElement(raw) : JsonSerializer.SerializeToElement(new { Request = merged });
                     var options = p.GetProperty("options").EnumerateArray().ToArray();
                     var canAllow = options.Any(o => Text(o, "kind") == "allow_once");
-                    var allowed = canAllow && await Ask(toolName, input, cwd, token);
+                    var allowed = canAllow && await Ask(toolName, input, cwd, token, s);
                     var option = options.FirstOrDefault(o => Text(o, "kind") == (allowed ? "allow_once" : "reject_once"));
                     object outcome = option.ValueKind == JsonValueKind.Undefined ? new { outcome = "cancelled" } : (object)new { outcome = "selected", optionId = option.GetProperty("optionId").GetString() };
                     await s.SendAsync(new { jsonrpc = "2.0", id = requestId.Clone(), result = new { outcome } }, token);

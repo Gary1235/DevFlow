@@ -110,13 +110,13 @@ public sealed partial class SqliteTaskStore
         Event(c, tx, task.Id, "WorkflowContinued", string.IsNullOrWhiteSpace(instructions) ? "已確認完成步驟，接續執行。" : "已回覆確認問題，接續執行。");
         tx.Commit(); return Task.FromResult(updated);
     }
-    public Task<WorkTask> SetWorkflowAsync(Guid taskId, WorkflowDefinition workflow, int expectedVersion, CancellationToken ct = default)
+    public Task<WorkTask> SetWorkflowAsync(Guid taskId, WorkflowDefinition workflow, int expectedVersion, CancellationToken ct = default, AiSelection? planningSelection = null)
     {
         workflow = WorkflowDefinition.Normalize(workflow);
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var task = ReadOne<WorkTask>(c, tx, "Tasks", taskId) ?? throw new MissingEntityException("Task not found.");
         if (task.Version != expectedVersion || task.Status is not (Status.AwaitingPlan or Status.AwaitingApproval or Status.PlanningFailed or
-            Status.AwaitingStepApproval or Status.Running or Status.Failed)) throw new ConflictException("目前無法編輯流程，請重新讀取。");
+            Status.AwaitingStepApproval or Status.Running or Status.Failed or Status.Cancelled or Status.Queued or Status.PlanningQueued or Status.Planning)) throw new ConflictException("目前無法編輯流程，請重新讀取。");
         if (task.Workflow?.Steps is not { } oldSteps || workflow.Steps is not { } nextSteps)
             throw new ConflictException("既有任務保留原流程；請建立新任務使用自訂步驟。");
         if (workflow.PlanningEnabled != task.Workflow.PlanningEnabled) throw new ConflictException("建立後不能改變規劃模式。");
@@ -124,7 +124,14 @@ public sealed partial class SqliteTaskStore
         if (nextSteps.Length < locked || oldSteps.Take(locked).Zip(nextSteps).Any(pair =>
                 JsonSerializer.Serialize(pair.First) != JsonSerializer.Serialize(pair.Second)))
             throw new ConflictException("已完成或正在執行的步驟不能修改、刪除或移動。");
-        var updated = task with { Workflow = workflow, Version = task.Version + 1 };
+        var ai = task.Ai;
+        if (planningSelection is not null)
+        {
+            if (!workflow.PlanningEnabled || task.Status is not (Status.AwaitingPlan or Status.AwaitingApproval or Status.PlanningFailed or Status.PlanningQueued or Status.Cancelled))
+                throw new ConflictException("目前無法更換規劃模型，請等待執行結束。");
+            ai = (ai ?? new AiConfiguration()) with { Planning = AiSelection.Normalize(planningSelection) };
+        }
+        var updated = task with { Workflow = workflow, Ai = ai, Version = task.Version + 1 };
         UpdateTask(c, tx, updated, task.Version);
         Event(c, tx, task.Id, "WorkflowUpdated", "尚未開始的流程步驟已更新。");
         tx.Commit(); return Task.FromResult(updated);

@@ -4,6 +4,7 @@ namespace DevFlow.Core;
 
 public interface IProcessSession
 {
+    CancellationToken ProcessExited => CancellationToken.None;
     Task SendAsync(object message, CancellationToken ct);
     Task<JsonElement?> ReadAsync(CancellationToken ct);
 }

@@ -2,7 +2,7 @@ using DevFlow.Core;
 namespace DevFlow.Runners;
 
 public sealed class RoutedCliRunner(IProcessRunner process, CliRegistry registry, string artifactsRoot,
-    ITaskToolApprovalStore? approvals = null, string? permissionHelper = null) : IAgentRunner, IPlanningRunner
+    ITaskToolApprovalStore? approvals = null, string? permissionHelper = null, ICliVerificationStore? verifications = null) : IAgentRunner, IPlanningRunner
 {
     private async Task<T> Invoke<T>(WorkTask task, Workspace workspace, Guid runId, bool planning, Func<IProcessRunner, CliCommand, string, Task<T>> action, CancellationToken ct)
     {
@@ -10,18 +10,30 @@ public sealed class RoutedCliRunner(IProcessRunner process, CliRegistry registry
         var command = registry.Require(provider);
         IProcessRunner prefixed = new PrefixedProcess(process, command);
         var operation = CliPermissions.Current ?? (approvals is null ? null : new TaskPermissionPlanningRunner.Operation(approvals, task.Id, runId, ct, provider, planning));
-        if (operation is null) return await action(prefixed, command, provider);
+        async Task<T> Call(IProcessRunner runner) {
+            try { return await action(runner, command, provider); }
+            catch (InvalidOperationException ex) when (ex.Message.StartsWith("[Authentication]", StringComparison.Ordinal)) {
+                await CliVerificationEvidence.RecordAsync(verifications, provider, command, false, null, "Execution"); throw;
+            }
+        }
+        async Task RecordSuccess() => await CliVerificationEvidence.RecordAsync(verifications, provider, command, true,
+            (planning ? task.Ai?.Planning : task.Ai?.Implementation)?.Model, CliPermissions.Current is null ? "Task" : "Discussion");
+        if (operation is null) { var answer = await Call(prefixed); await RecordSuccess(); return answer; }
         T result;
+        try {
         if (provider == "antigravity")
         {
             if (permissionHelper is null) throw new InvalidOperationException("Antigravity permission helper is not configured.");
             await using var hook = await NativePermissionHook.CreateAsync(operation, workspace.Path,
                 Path.Combine(artifactsRoot, runId.ToString("N"), "permission-decisions.jsonl"), ct, permissionHelper);
-            result = await action(prefixed, command, provider);
+            result = await Call(prefixed);
         }
-        else result = await action(new PermissionProcess(prefixed, provider, operation), command, provider);
-        if (operation is TaskPermissionPlanningRunner.Operation { Failure: { } failure }) throw new InvalidOperationException(failure);
-        return result;
+        else result = await Call(new PermissionProcess(prefixed, provider, operation));
+        } catch (Exception ex) when (operation.Failure is not null && !ct.IsCancellationRequested) {
+            throw new InvalidOperationException(operation.Failure, ex);
+        }
+        if (operation.Failure is { } failure) throw new InvalidOperationException(failure);
+        await RecordSuccess(); return result;
     }
     public async Task ExecuteAsync(WorkTask task, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct) =>
         await Invoke(task, workspace, runId, false, async (runner, command, provider) =>

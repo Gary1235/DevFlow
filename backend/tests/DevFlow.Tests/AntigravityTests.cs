@@ -28,12 +28,17 @@ public sealed class AntigravityTests : IAsyncLifetime
         Assert.Equal("規劃內容", await runner.PlanAsync(task, new(root, "base"), run, default));
         Assert.Contains("plan", process.Arguments); Assert.Contains("gemini-custom", process.Arguments); Assert.Contains("high", process.Arguments);
         Assert.DoesNotContain("--prompt", process.Arguments); Assert.DoesNotContain("--dangerously-skip-permissions", process.Arguments);
+        Assert.Equal("0",process.Arguments[Array.IndexOf(process.Arguments,"--print-timeout")+1]);
         Assert.EndsWith("\n", process.Input);
         using var input = JsonDocument.Parse(process.Input!);
         Assert.Equal("user", input.RootElement.GetProperty("event").GetString());
         Assert.Contains("中文任務", input.RootElement.GetProperty("message").GetProperty("content").GetString());
+        Assert.Contains("Designated task worktree", input.RootElement.GetProperty("message").GetProperty("content").GetString());
+        Assert.Contains(root, input.RootElement.GetProperty("message").GetProperty("content").GetString());
+        Assert.Contains("bypass a denied operation", input.RootElement.GetProperty("message").GetProperty("content").GetString());
         await runner.ExecuteAsync(task, new(root, "base"), run, TddPhase.Implementation, default);
         Assert.Contains("accept-edits", process.Arguments); Assert.Contains("model-custom", process.Arguments); Assert.Contains("low", process.Arguments);
+        Assert.Equal("0",process.Arguments[Array.IndexOf(process.Arguments,"--print-timeout")+1]);
         Assert.Contains("--sandbox", process.Arguments);
     }
 

@@ -36,8 +36,9 @@ public sealed partial class ExecutionCoordinator
                 {
                     await activity.StageAsync(step.Name + " · 基準測試", ct);
                     var baseline = await ValidateStepAsync(validator, project, stepBase, claim, step, TddPhase.Baseline, ct);
-                    if (baseline.ExitCode != 0 || baseline.Failed != 0) throw new InvalidOperationException("Baseline validation failed.");
-                    var validationEvidence = new List<string> { $"Baseline: total {baseline.Total}, failed {baseline.Failed}" };
+                    if (baseline.ExitCode != 0 || baseline.Failed != 0) throw new InvalidOperationException("基準驗證未通過：" + (baseline.Error ?? "請查看驗證日誌。"));
+                    if (policy.Tdd && baseline.Kind != "DotnetTest") throw new InvalidOperationException("TDD 需要可收集逐項結果的 DotnetTest 驗證；一般建置指令請改用標準實作模式。");
+                    var validationEvidence = new List<string> { $"Baseline ({baseline.Kind}): total {baseline.Total}, failed {baseline.Failed}" };
                     string[] red = [];
                     foreach (var phase in policy.Tdd ? new[] { TddPhase.Red, TddPhase.Green, TddPhase.Refactor } : [TddPhase.Implementation])
                     {
@@ -58,7 +59,7 @@ public sealed partial class ExecutionCoordinator
                                 throw new InvalidOperationException("Red requires actual failing tests; build errors do not qualify.");
                             red = evidence.FailedTests;
                         }
-                        else if (evidence.ExitCode != 0 || evidence.Total == 0 || evidence.Failed != 0 ||
+                        else if (evidence.ExitCode != 0 || (evidence.Kind == "DotnetTest" && evidence.Total == 0) || evidence.Failed != 0 ||
                             baseline.PassedTests.Except(evidence.PassedTests, StringComparer.Ordinal).Any() ||
                             red.Except(evidence.PassedTests, StringComparer.Ordinal).Any())
                             throw new InvalidOperationException(phase + " must pass, including baseline and Red tests.");
@@ -101,7 +102,7 @@ public sealed partial class ExecutionCoordinator
                                 await guard.CheckAsync(guidedBase, stepPolicy, ct);
                             }
                             var guidedEvidence = await ValidateStepAsync(validator, project, guidedBase, claim, step, TddPhase.Implementation, ct);
-                            if (guidedEvidence.ExitCode != 0 || guidedEvidence.Total == 0 || guidedEvidence.Failed != 0)
+                            if (guidedEvidence.ExitCode != 0 || (guidedEvidence.Kind == "DotnetTest" && guidedEvidence.Total == 0) || guidedEvidence.Failed != 0)
                                 throw new InvalidOperationException("規劃 AI 指揮修正後測試未通過。");
                             head = await workspaces.SnapshotAsync(guidedBase, ct);
                             summary = $"規劃 AI 已於規則內直接回覆並指揮完成修正（{guidanceText}）；成果 {head}";
@@ -126,10 +127,10 @@ public sealed partial class ExecutionCoordinator
                 {
                     await activity.StageAsync(step.Name + " · 整合測試", ct);
                     var evidence = await ValidateStepAsync(validator, project, stepBase, claim, step, TddPhase.Implementation, ct);
-                    if (evidence.ExitCode != 0 || evidence.Total == 0 || evidence.Failed != 0)
-                        throw new InvalidOperationException("Integration validation failed or produced no tests.");
+                    if (evidence.ExitCode != 0 || (evidence.Kind == "DotnetTest" && evidence.Total == 0) || evidence.Failed != 0)
+                        throw new InvalidOperationException("驗證未通過：" + (evidence.Error ?? "沒有產生測試結果或測試失敗，請查看日誌。"));
                     await workspaces.AssertUnchangedAsync(stepBase, ct);
-                    summary = $"測試通過：{evidence.Total} 個測試。";
+                    summary = evidence.Kind == "DotnetTest" ? $"測試通過：{evidence.Total} 個測試。" : "指令驗證通過（退出碼 0）；此結果不代表功能測試通過。";
                 }
                 else if (step.Kind == "Review")
                 {
@@ -174,7 +175,10 @@ public sealed partial class ExecutionCoordinator
     private async Task<ValidationEvidence> ValidateStepAsync(IValidationRunner validator, ProjectDefinition project, Workspace workspace,
         TaskClaim claim, WorkflowStep step, TddPhase phase, CancellationToken ct)
     {
-        var evidence = await validator.ValidateAsync(project, workspace, claim.Run.Id, phase, ct);
+        var selected = step.ValidationProfileId ?? project.DefaultValidationProfileId;
+        if (selected is not null && !((project.ValidationProfiles ?? []).Any(p => p.Id == selected)))
+            throw new InvalidOperationException("找不到驗證設定「" + selected + "」，請至專案設定重新選擇。");
+        var evidence = await validator.ValidateAsync(project with { DefaultValidationProfileId = selected }, workspace, claim.Run.Id, phase, ct);
         await store.AppendEventAsync(claim.Task.Id, "StepValidation", $"{step.Name} · {phase}: exit {evidence.ExitCode}, total {evidence.Total}, failed {evidence.Failed}", ct);
         return evidence;
     }

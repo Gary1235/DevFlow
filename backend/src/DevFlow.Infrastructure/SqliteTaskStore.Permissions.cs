@@ -21,19 +21,27 @@ public sealed partial class SqliteTaskStore
         if (!ApprovalRunActive(c, tx, request.TaskId, request.OperationId)) throw new ConflictException("此規劃已結束。");
         WorkTask.Required(request.Tool, 100);
         if (request.Arguments.ValueKind != JsonValueKind.Object || request.Arguments.GetRawText().Length > 20000 ||
-            request.State != "Pending" || request.ExpiresAt <= DateTimeOffset.UtcNow || request.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2.1))
+            request.State != "Pending")
             throw new ArgumentException("工具確認格式無效。");
         var task = ReadOne<WorkTask>(c, tx, "Tasks", request.TaskId)!;
-        var rule = ReadPermissionRules(c, tx).FirstOrDefault(r => ToolPermissionMatching.Matches(r, task.ProjectId, task.Id, request.Tool, request.Arguments, request.Workspace, request.Provider));
-        if (rule is not null) request = request with { State = "AllowedByRule", MatchedRuleId = rule.Id, ApprovalScope = rule.TaskId is null ? "Project" : "Task" };
+        var policy = ReadPolicy(c, tx);
+        var run = ReadOne<TaskRun>(c, tx, "Runs", request.OperationId)!;
+        var step = task.Workflow?.Steps?.FirstOrDefault(s => s.Id == task.ActiveStepId);
+        var project = ReadOne<ProjectDefinition>(c, tx, "Projects", task.ProjectId);
+        var assessment = PermissionPolicy.Assess(policy, request.Tool, request.Arguments, request.Workspace, request.ReadOnly || run.Kind == RunKind.Planning,
+            [task.Policy?.AllowedPaths ?? [], step?.AllowedPaths ?? []], project);
+        request = request with { PolicyAssessment = assessment, PolicyVersion = policy.Version };
+        var rule = policy.AutomationEnabled ? null : ReadPermissionRules(c, tx).FirstOrDefault(r => ToolPermissionMatching.Matches(r, task.ProjectId, task.Id, request.Tool, request.Arguments, request.Workspace, request.Provider));
+        if (assessment.AutoAllowed) request = request with { State = "AllowedByPolicy", ApprovalScope = "Policy" };
+        else if (rule is not null) request = request with { State = "AllowedByRule", MatchedRuleId = rule.Id, ApprovalScope = rule.TaskId is null ? "Project" : "Task" };
         else
         {
-            using var count = Command(c, tx, "SELECT COUNT(*) FROM ToolApprovals WHERE RunId=$run AND json_extract(Payload,'$.State') <> 'AllowedByRule'", ("$run", request.OperationId.ToString()));
+            using var count = Command(c, tx, "SELECT COUNT(*) FROM ToolApprovals WHERE RunId=$run AND json_extract(Payload,'$.State') NOT IN ('AllowedByRule','AllowedByPolicy')", ("$run", request.OperationId.ToString()));
             if (Convert.ToInt64(count.ExecuteScalar()) >= 50) throw new ConflictException("本次工具確認次數已達上限。");
         }
         Execute(c, tx, "INSERT INTO ToolApprovals VALUES($id,$task,$run,$payload)", ("$id", request.Id.ToString()),
             ("$task", request.TaskId.ToString()), ("$run", request.OperationId.ToString()), ("$payload", JsonSerializer.Serialize(request)));
-        Event(c, tx, request.TaskId, rule is null ? "ToolApprovalRequested" : "ToolApprovalRuleApplied", request.Tool);
+        Event(c, tx, request.TaskId, assessment.AutoAllowed ? "ToolApprovalPolicyApplied" : rule is null ? "ToolApprovalRequested" : "ToolApprovalRuleApplied", request.Tool + " · " + assessment.Label);
         tx.Commit(); return Task.CompletedTask;
     }
 
@@ -47,9 +55,9 @@ public sealed partial class SqliteTaskStore
         for (var i = 0; i < requests.Count; i++)
         {
             var r = requests[i];
-            if (r.State == "Pending" && (r.ExpiresAt <= DateTimeOffset.UtcNow || !ApprovalRunActive(c, tx, r.TaskId, r.OperationId)))
+            if (r.State == "Pending" && !ApprovalRunActive(c, tx, r.TaskId, r.OperationId))
             {
-                requests[i] = r with { State = "Expired" };
+                requests[i] = r with { State = "Expired", EndReason = "執行已結束或取消；此確認不再有效。" };
                 SaveApproval(c, tx, requests[i]);
             }
         }
@@ -64,7 +72,7 @@ public sealed partial class SqliteTaskStore
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var r = ReadOne<TaskToolApproval>(c, tx, "ToolApprovals", requestId);
         if (r is null || r.TaskId != taskId || r.OperationId != operationId || r.State != "Pending" ||
-            r.ExpiresAt <= DateTimeOffset.UtcNow || !ApprovalRunActive(c, tx, taskId, operationId))
+            !ApprovalRunActive(c, tx, taskId, operationId))
             throw new ConflictException("此確認已失效或已回覆，請重新整理任務。");
         choice ??= new();
         if (choice.Scope is not ("Once" or "Task") || !allow && choice.Scope != "Once") throw new ArgumentException("只允許單次或本次任務的一般讀取授權。");
@@ -85,11 +93,11 @@ public sealed partial class SqliteTaskStore
         tx.Commit(); return Task.CompletedTask;
     }
 
-    public Task ExpireToolApprovalAsync(Guid taskId, Guid requestId, CancellationToken ct = default)
+    public Task ExpireToolApprovalAsync(Guid taskId, Guid requestId, CancellationToken ct = default, string? reason = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var r = ReadOne<TaskToolApproval>(c, tx, "ToolApprovals", requestId);
-        if (r?.TaskId == taskId && r.State == "Pending") SaveApproval(c, tx, r with { State = "Expired" });
+        if (r?.TaskId == taskId && r.State == "Pending") SaveApproval(c, tx, r with { State = "Expired", EndReason = reason ?? "執行已結束或取消；此確認不再有效。" });
         tx.Commit(); return Task.CompletedTask;
     }
 

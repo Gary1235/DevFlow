@@ -37,6 +37,83 @@ public sealed class DiscussionApiTests : IAsyncLifetime
         return await response.Content.ReadFromJsonAsync<JsonElement>();
     }
 
+    private async Task<(WorkTask Task, Discussion Discussion)> CreatePlanDiscussion()
+    {
+        var task = WorkTask.Create(project.Id, "訂單頁面", "改善列表排版", "建置成功")
+            with { Ai = new(new("antigravity", "planner-model")) };
+        task = task.SetPlan("修改 shipping-list.component.scss，執行 npm run build。");
+        await factory.Services.GetRequiredService<ITaskStore>().AddTaskAsync(task);
+        var response = await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion", new { });
+        response.EnsureSuccessStatusCode();
+        return (task, (await response.Content.ReadFromJsonAsync<Discussion>())!);
+    }
+
+    [Fact] public async Task Plan_discussion_is_task_local_persistent_and_does_not_run_until_a_message_is_sent()
+    {
+        var (task, discussion) = await CreatePlanDiscussion();
+        var again = await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion", new { });
+        Assert.Equal(discussion.Id, (await again.Content.ReadFromJsonAsync<Discussion>())!.Id);
+        Assert.Equal(task.Id, discussion.PlanTaskId);
+        Assert.Equal("planner-model", discussion.Selection.Model);
+        Assert.Empty(await client.GetFromJsonAsync<Discussion[]>("/api/discussions") ?? []);
+        Assert.Equal(0, runner.Calls);
+        var reply = await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/messages", new { expectedVersion = 0, message = "好，先解釋風險", planRevision = 1 });
+        reply.EnsureSuccessStatusCode();
+        var saved = (await reply.Content.ReadFromJsonAsync<Discussion>())!;
+        Assert.Equal(task.Description, saved.Messages[0].PlanContext!.Requirements);
+        Assert.Contains("shipping-list.component.scss", runner.Transcript);
+        Assert.Contains("execution approval", runner.Instruction);
+        Assert.All(saved.Messages, m => Assert.Null(m.ProposedPlan));
+        Assert.Equal(task, await factory.Services.GetRequiredService<ITaskStore>().GetTaskAsync(task.Id));
+        Assert.Null(await factory.Services.GetRequiredService<ITaskStore>().ClaimNextAsync());
+    }
+
+    [Fact] public async Task Plan_proposal_only_creates_a_new_revision_after_explicit_apply_and_never_approves_execution()
+    {
+        var (task, discussion) = await CreatePlanDiscussion();
+        runner.Response = "{\"summary\":\"增加響應式排版及驗證\",\"plan\":\"1. 修改 shipping-list.component.scss 增加手機排版。\\n2. 執行 npm run build，並檢查手機尺寸。\"}";
+        var response = await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/plan-proposal", new { expectedVersion = 0, planRevision = 1 });
+        response.EnsureSuccessStatusCode();
+        var result = (await response.Content.ReadFromJsonAsync<Discussion>())!;
+        var proposal = result.Messages.Last();
+        Assert.NotNull(proposal.ProposedPlan);
+        Assert.Equal(task.Version, proposal.PlanContext!.TaskVersion);
+        var store = factory.Services.GetRequiredService<SqliteTaskStore>();
+        Assert.Equal(task.Plan, (await store.GetTaskAsync(task.Id))!.Plan);
+        Assert.Equal(2, (await client.GetFromJsonAsync<Discussion>($"/api/discussions/{task.Id}"))!.Messages.Length);
+        var apply = await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion/apply", new { messageId = proposal.Id, expectedVersion = task.Version });
+        apply.EnsureSuccessStatusCode();
+        var updated = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(DevFlow.Core.TaskStatus.AwaitingApproval, updated.Status);
+        Assert.Equal(2, updated.Plan!.Revision);
+        Assert.Equal(proposal.ProposedPlan, updated.Plan.Text);
+        Assert.Equal(2, (await store.ListPlansAsync(task.Id)).Count);
+        Assert.Null(await store.ClaimNextAsync());
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion/apply", new { messageId = proposal.Id, expectedVersion = updated.Version })).StatusCode);
+    }
+
+    [Fact] public async Task Plan_discussion_rejects_stale_proposals_and_incomplete_output_but_preserves_conversation()
+    {
+        var (task, discussion) = await CreatePlanDiscussion();
+        runner.Response = "{\"summary\":\"尚未完成\",\"plan\":\"正在分析程式碼\"}";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/plan-proposal", new { expectedVersion = 0 })).StatusCode);
+        var store = factory.Services.GetRequiredService<SqliteTaskStore>();
+        var saved = (await store.GetDiscussionAsync(task.Id, default))!;
+        Assert.Single(saved.Messages); Assert.Null(saved.ActiveOperation); Assert.NotNull(saved.Error);
+        runner.Response = "{\"summary\":\"調整樣式\",\"plan\":\"修改樣式後執行 npm run build。\"}";
+        var reply = await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/plan-proposal", new { expectedVersion = saved.Version });
+        reply.EnsureSuccessStatusCode();
+        var proposal = (await reply.Content.ReadFromJsonAsync<Discussion>())!.Messages.Last();
+        var edited = task.SetPlan("另一個編輯者更新的計畫");
+        await store.SaveTaskAsync(edited, task.Version);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion/apply", new { messageId = proposal.Id, expectedVersion = edited.Version })).StatusCode);
+        var historical = await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/messages", new { expectedVersion = (await store.GetDiscussionAsync(task.Id, default))!.Version, message = "解釋舊版", planRevision = 1 });
+        historical.EnsureSuccessStatusCode();
+        Assert.Contains("shipping-list.component.scss", runner.Transcript);
+        Assert.Equal(1, (await historical.Content.ReadFromJsonAsync<Discussion>())!.Messages.Last().PlanContext!.Revision);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/discussions/{discussion.Id}/drafts", new { expectedVersion = 6 })).StatusCode);
+    }
+
     [Fact] public async Task Latest_failed_discussion_artifacts_are_available_without_starting_another_model()
     {
         var discussion = await CreateDiscussion(); var id = discussion.GetProperty("id").GetGuid();
@@ -186,6 +263,7 @@ public sealed class DiscussionApiTests : IAsyncLifetime
     [InlineData(false)]
     public async Task Background_discussion_waits_for_web_decision_and_resumes_the_same_hook(bool allow)
     {
+        await store().SavePermissionPolicyAsync(new(AutomationEnabled: false), 0);
         var d = await CreateDiscussion(); var id = d.GetProperty("id").GetGuid(); runner.UseHook = true;
         Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/discussions/{id}/messages?background=1",
             new { expectedVersion = 0, message = "確認工具請求", selection = new { provider = "antigravity" } })).StatusCode);
@@ -224,12 +302,13 @@ public sealed class DiscussionApiTests : IAsyncLifetime
     }
     private sealed class ReadOnlyRunner : IPlanningRunner
     {
-        public int Calls; public bool Fail, Block, UseHook; public string? Transcript;
+        public int Calls; public bool Fail, Block, UseHook; public string? Transcript, Instruction, Response;
         public TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<string> PlanAsync(WorkTask task, Workspace w, Guid id, CancellationToken ct)
         {
             Calls++; if (Fail) throw new InvalidOperationException("Provider unavailable");
             Transcript = task.Description;
+            Instruction = task.ReadOnlyInstruction;
             if (UseHook)
             {
                 // Hook installation now belongs to RoutedCliRunner. This fake runner exercises
@@ -253,9 +332,9 @@ public sealed class DiscussionApiTests : IAsyncLifetime
                 ProcessOutput.Observer?.Invoke("{\"event\":\"step_update\",\"step_update\":{\"step_type\":\"agent_response\",\"text_delta\":\"正在分析\"}}\n");
                 Started.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             }
-            return task.ReadOnlyInstruction!.StartsWith("Convert", StringComparison.Ordinal)
+            return Response ?? (task.ReadOnlyInstruction!.StartsWith("Convert", StringComparison.Ordinal)
                 ? "{\"tasks\":[{\"title\":\"Audit log\",\"description\":\"Add audit logs\",\"acceptanceCriteria\":\"Events persist\",\"openQuestions\":[\"What is retention?\"]}]}"
-                : "We can add an audit log. How long should records be kept?";
+                : "We can add an audit log. How long should records be kept?");
         }
     }
 }

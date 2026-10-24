@@ -72,11 +72,11 @@ $env:DevFlow__Models__Claude__0 = 'sonnet'
 免額度狀態查詢使用 `claude auth status`，只輸出登入狀態，不暴露 email 或憑證。
 登入成功不代表帳號有模型使用資格，資格與額度由官方 CLI 確認。
 
-Runner 使用 --print、JSON 輸出、--model、--restricted 與 --no-session-persistence。
-需要 Claude Code **2.1.248 或更新版**以支援 restricted mode；舊版不會降級成放寬權限模式。
-規劃只提供 Read／Glob／Grep，實作額外提供 Edit／Write；不提供 Bash 或 MCP 工具。
-restricted mode 將檔案工具限制在工作目錄且不載入使用者／專案的自訂設定；
-它是 CLI 層級的限制，不是額外的 OS Sandbox。測試與 Git 操作仍由 Orchestrator 執行。
+目前工作台的正式路徑由 RoutedCliRunner／PermissionProcess 轉成 stream-json 雙向確認，
+使用 --print、--model、--no-session-persistence，移除直接 Runner 的 --restricted。
+規劃提供 Read／Glob／Grep／Bash，實作另提供 Edit／Write；工具請求交由 DevFlow 權限政策判斷。
+直接使用 ClaudeCliRunner 的獨立模式仍採 restricted 行為，不能拿它代表工作台的實際權限。
+DevFlow 政策、CLI 原生限制與 OS 權限是不同層級；工作副本不是額外的 OS sandbox。
 Run 保存要求設定、prompt、Claude JSON、stderr 與 TDD 證據；非零 exit code、is_error 或不完整結果都視為失敗。
 
 依據 [Claude Code CLI 官方文件](https://code.claude.com/docs/en/cli-reference) 與
@@ -230,7 +230,7 @@ dotnet run --project src/DevFlow.Worker
 
 API 也使用相同的 DevFlow__DatabasePath 與 DevFlow__ArtifactsRoot。WorktreeRoot 必須在被調度的 Repository 外。
 Worker 自動尋找或使用設定的 CLI；所有供應商都不可用時明確停止啟動。
-Codex 每個階段使用獨立 codex exec，透過 stdin 提供需求與核准計畫。規劃使用 read-only sandbox，實作使用 workspace-write sandbox。
+Codex 正式權限路徑每個階段使用獨立 app-server thread，傳入需求與核准計畫；規劃使用 read-only sandbox，實作使用 workspace-write sandbox。預設註冊實驗性 dynamic tools，提供主程序的結構化檔案操作與已儲存驗證設定；舊 CLI 可用 `DevFlow__StructuredToolsEnabled=false` 關閉此擴充。其他供應商仍沿用各自原生權限協定。
 依據 [OpenAI Docs：非互動模式](https://learn.chatgpt.com/docs/non-interactive-mode) 建立 Adapter；
 已核對本機 CLI help。真實 CLI 驗證工具已加入，但在本次 Desktop 工具環境中，
 CLI 啟動回傳 Windows 存取拒絕；尚未完成真實模型的規劃／實作驗證。
@@ -355,8 +355,8 @@ approve-plan 現在必須提供任務 expectedVersion 與 planRevision：
 檔案寫入中或證據不完整時回傳 409，可稍後重試。
 
 validations 回傳 Baseline／Red／Green／Refactor 的 exitCode、total、failed 與 evidencePath。
-CLI 完整 log 目前在各階段程序結束後保存；執行中的進度使用 tasks/{id}/events 輪詢。
-這一版沒有 CLI stdout 即時串流或 SignalR。
+CLI 完整 log 於各階段程序結束後保存；執行中的活動摘要與部分 CLI 輸出由轉接器回報，
+工作台透過 API 輪詢讀取。尚未使用 SignalR。全域待確認由 GET /api/permissions/pending 提供。
 
 ## 人工審核與重試
 
@@ -399,7 +399,7 @@ Reject 將任務標為 Rejected，保留修正意見與成果 commit，不立即
 
 目標 Repository 必須位於專案設定的根目錄、已切換到設定的 baseBranch、工作目錄乾淨，
 且 HEAD 與 expectedTargetCommit 相同。只有最新已核准的 Run 與成果 commit 可合併。
-這一版只允許 fast-forward，不自動處理分歧或衝突；需要重新整合並驗證的新成果應另建任務。
+直接合併只允許 fast-forward。分歧時可呼叫 `/api/tasks/{id}/integrate`，傳入與合併相同的版本、Run、成果與目標 commit 欄位，建立隔離整合、重驗證及重新審核的新任務；原成果與原副本保留。
 使用 --no-autostash 與 --no-overwrite-ignore，保護本機未提交與被忽略的檔案。
 詳見 [Git merge 官方文件](https://git-scm.com/docs/git-merge)。
 
@@ -419,7 +419,7 @@ Git 與 SQLite 無法共用同一個交易。若程序中斷或結果無法確�
 執行中的合併禁止 reconcile；重啟後的 Pending 紀錄需等待建立時間滿兩分鐘，
 且人工確認舊 Git 程序已停止，才進行核對。已保存的 Uncertain 紀錄可在確認程序停止後立即核對。
 DevFlow 的 Repository 互斥僅協調此資料庫內的操作；合併期間請避免在其他工具切換分支或修改同一 Repository。
-不同資料庫管理同一 Repository、Repository 路徑別名及複雜整合流程尚待擴充。
+同一資料庫會統一路徑連結與 Git common-dir 身分；不同資料庫管理同一 Repository 的互斥仍待擴充。
 
 ## TDD 驗證與保存方式
 
@@ -438,9 +438,9 @@ Worktree 隔離 Git 變更，程序權限則由 CLI sandbox 與主機設定控�
 
 ## 後續功能
 
-- 澄清問題、分歧整合與重新審核流程。
+- 澄清問題、超長差異分批審查、孤立 CLI 重連與跨資料庫互斥。
 - SignalR 即時推送、列表分頁、資料库 migration。
 - Gemini Runner、前後端步驟依賴、整合驗證、前端預覽與 MCP。
 
-目前版本完成 CLI 自動規劃、版本核准、後端自動 TDD、紀錄查詢、人工成果審核、修正重試與本地 fast-forward 合併。
+目前版本完成 CLI 自動規劃、版本核准、後端自動 TDD、紀錄查詢、人工成果審核、修正重試、本地 fast-forward 合併，以及隔離分歧整合／失敗副本恢復。設定診斷、歷史分頁與新增 API 的使用邊界見 [第二輪改善紀錄](../docs/audit-round-two.md)。
 

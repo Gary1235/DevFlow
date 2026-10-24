@@ -57,6 +57,17 @@ public sealed class ArtifactTests : IAsyncLifetime
         Assert.Equal(2, page.NextOffset);
         await Assert.ThrowsAsync<ArgumentException>(() => new RunArtifactReader(root).ReadAsync(runId, "out.log", 1, 1));
     }
+    [Fact] public async Task Repair_and_structured_tool_evidence_are_visible_without_overwriting_the_original()
+    {
+        foreach (var scope in new[] { "Implementation", "Attempt-1/Implementation", "Structured-1/Implementation" }) {
+            var directory = Path.Combine(RunRoot, scope); Directory.CreateDirectory(directory);
+            await File.WriteAllTextAsync(Path.Combine(directory, "evidence.json"), "{\"ExitCode\":0,\"Total\":0,\"Failed\":0,\"Kind\":\"Command\"}");
+        }
+        var rows = await new RunArtifactReader(root).ValidationsAsync(runId);
+        Assert.Equal(3, rows.Count); Assert.Contains(rows, r => r.Origin == "Worker" && r.Attempt == 0);
+        Assert.Contains(rows, r => r.Origin == "Repair" && r.Attempt == 1);
+        Assert.Contains(rows, r => r.Origin == "StructuredTool");
+    }
     [Fact] public async Task Corrupt_evidence_is_not_reported_as_success()
     {
         Directory.CreateDirectory(Path.Combine(RunRoot, "Green"));

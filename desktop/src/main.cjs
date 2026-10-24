@@ -10,6 +10,7 @@ app.setAppUserModelId('dev.devflow.desktop');
 let window, tray, services, timer, updates, updateTimer;
 let ready = false, quitting = false, confirming = false, failureShown = false;
 let previous;
+let previousPermissions = new Set();
 const smoke = process.argv.includes('--smoke-test');
 if (smoke) app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'devflow-smoke-profile-')));
 const icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
@@ -156,6 +157,17 @@ async function poll() {
       notification.show();
     }
     previous = new Map(tasks.map(task => [task.id, task.status]));
+    const pending = await (await services.request('/api/permissions/pending')).json();
+    for (const request of pending) {
+      if (previousPermissions.has(request.id) || !Notification.isSupported()) continue;
+      const notification = new Notification({ title: '工具等待核准', body: request.title + ' · ' + request.reason, icon });
+      notification.on('click', () => {
+        show();
+        if (!window.isDestroyed()) void window.loadURL(`${services.origin}/#${request.kind}/${encodeURIComponent(request.ownerId)}`);
+      });
+      notification.show();
+    }
+    previousPermissions = new Set(pending.map(p => p.id));
   } catch { /* A transient request failure must not restart or duplicate services. */ }
 }
 

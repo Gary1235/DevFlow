@@ -26,7 +26,8 @@ public sealed record WorkflowStep(Guid Id, string Name, string Kind = "Implement
     string? ValidationProfileId = null);
 public sealed record WorkflowTemplate(string Name, WorkflowDefinition Workflow);
 public sealed record WorkflowStepResult(Guid StepId, string Name, string Kind, string State, Guid RunId,
-    string? ResultCommit, string? Summary, AiSelection? Selection, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt = null);
+    string? ResultCommit, string? Summary, AiSelection? Selection, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt = null,
+    bool? RequiresRework = null);
 public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection[]? Reviewers = null, int MaxReviewRetries = 0,
     WorkflowStep[]? Steps = null)
 {
@@ -70,6 +71,17 @@ public sealed record Discussion(Guid Id, Guid ProjectId, string Title, AiSelecti
 
 public static class TaskInstructions
 {
+    public static WorkTask WithValidationCommands(WorkTask task, ProjectDefinition project)
+    {
+        var profiles = (project.ValidationProfiles ?? []).Select(p => new { p.Id, p.Executable, p.Arguments, p.WorkingDirectory }).ToList();
+        if (project.DefaultValidationProfileId is null) profiles.Add(new { Id = "legacy-dotnet-test", Executable = "dotnet", Arguments = project.ValidationArguments, WorkingDirectory = "." });
+        return task with { TaskRules = task.TaskRules +
+            "\nPreapproved validation commands (exact executable, argv and worktree-relative cwd):\n" + JsonSerializer.Serialize(profiles) +
+            "\nUse the tool's working-directory argument and invoke one exact command at a time, without cd, shell wrappers, extra flags or chaining. " +
+            "These grants do not cover installation/preparation scripts. Prefer native structured file read/search/edit tools over shell scripts. " +
+            "For shell searches, specify narrow source/test directories instead of scanning generated dependency trees. " +
+            "If a request needs additional authorization, report its exact reason; do not bypass a denial." };
+    }
     public static string For(WorkTask task, string stage, string? workspace = null) =>
         (workspace is null ? "" : "Designated task worktree (the only default authorized project directory): " + workspace +
             "\nUse paths relative to this worktree. The original checkout, DevFlow source/install directories and other tasks' worktrees are outside this boundary. " +
@@ -79,7 +91,7 @@ public static class TaskInstructions
             .Select(r => $"[{r.Name} v{r.Version}]\n{r.Content}")) +
         "\nTask-specific rules:\n" + task.TaskRules +
         "\nAllowed edit paths (empty means entire repository):\n" + string.Join("\n", task.Policy?.AllowedPaths ?? []) +
-        "\nExecution mode: " + (task.Policy?.Tdd == false ? "Standard implementation with validation" : "TDD") +
+        "\nExecution mode: " + (task.Integration is not null ? "Integrate a previously validated result, then validate and review again" : task.Recovery is { Applied: false } ? "Repair an interrupted implementation checkpoint; preserve previous TDD evidence" : task.Policy?.Tdd == false ? "Standard implementation with validation" : "TDD") +
         "\nIf requirements or rules conflict, report the conflict; do not silently ignore a rule.";
 
     public static T ParseJson<T>(string output)

@@ -10,7 +10,7 @@ public sealed record RuntimePaths(string Database, string Artifacts, string Work
         var data = repository is null ? Path.Combine(currentDirectory, ".data") : Path.Combine(repository, "backend", "src", "DevFlow.Api", ".data");
         var db = Path.GetFullPath(database ?? Path.Combine(data, "devflow.db"), currentDirectory);
         data = Path.GetDirectoryName(db)!;
-        var defaultWorktrees = database is null && repository is not null ? Path.Combine(repository, "backend", "src", "DevFlow.Worktrees") : Path.Combine(data, "worktrees");
+        var defaultWorktrees = database is null && repository is not null ? repository + ".worktrees" : Path.Combine(data, "worktrees");
         return new(db, Path.GetFullPath(artifacts ?? Path.Combine(data, "artifacts"), currentDirectory),
             Path.GetFullPath(worktrees ?? defaultWorktrees, currentDirectory),
             Path.GetFullPath(cliControl ?? Path.Combine(data, "cli-control"), currentDirectory));

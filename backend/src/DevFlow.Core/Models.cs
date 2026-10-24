@@ -16,7 +16,8 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
     RuleSnapshot[]? Rules = null, string? TaskRules = null, ExecutionPolicy? Policy = null,
     WorkflowDefinition? Workflow = null, Guid? SourceDiscussionId = null, Guid? SourceDraftId = null,
     int AutoReviewAttempt = 0, string? ExecutionBaseCommit = null,
-    WorkflowStepResult[]? StepResults = null, Guid? ActiveStepId = null)
+    WorkflowStepResult[]? StepResults = null, Guid? ActiveStepId = null,
+    string? ResumeCommit = null, IntegrationSource? Integration = null, RecoverySource? Recovery = null)
 {
     [System.Text.Json.Serialization.JsonIgnore]
     public string? ReadOnlyInstruction { get; init; }
@@ -66,7 +67,7 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
         var status = Workflow?.PlanningEnabled != false ? TaskStatus.PlanningQueued :
             Plan is not null && PlanContent.Problem(Plan.Text) is null ? TaskStatus.AwaitingApproval : TaskStatus.AwaitingPlan;
         return this with { Status = status, Version = Version + 1, StepResults = [], ActiveStepId = null,
-            RevisionCommit = null, RevisionInstructions = null, ExecutionBaseCommit = null, AutoReviewAttempt = 0 };
+            RevisionCommit = null, RevisionInstructions = null, ExecutionBaseCommit = null, AutoReviewAttempt = 0, ResumeCommit = null, Recovery = null };
     }
     public WorkTask Review(ReviewDecision decision, string? comments, string resultCommit)
     {
@@ -95,6 +96,8 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
     }
 }
 public sealed record TaskEvent(long Sequence, Guid TaskId, string Kind, string Message, DateTimeOffset CreatedAt);
+public sealed record IntegrationSource(Guid TaskId, Guid RunId, string ResultCommit, string TargetCommit, string[] ValidationProfileIds, AiSelection[]? Reviewers = null);
+public sealed record RecoverySource(Guid TaskId, Guid RunId, string CheckpointCommit, Guid StepId, string[] RequiredTests, bool Applied = false);
 public sealed record TaskRun(Guid Id, Guid TaskId, string Status, string? WorktreePath, string? BaseCommit,
     string? ResultCommit, string? Error, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, RunKind Kind = RunKind.Implementation,
     AiSelection? Selection = null, AiAcceptanceReport[]? AiReviews = null, WorkflowStepResult[]? Steps = null, RuntimeSnapshot? Activity = null);

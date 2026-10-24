@@ -5,6 +5,8 @@ namespace DevFlow.Core;
 
 internal static partial class CommandPermissionRisk
 {
+    internal static PermissionAssessment LiteralExecution(string executable, string[] arguments) =>
+        OtherCommand([Path.GetFileNameWithoutExtension(executable).ToLowerInvariant(), .. arguments]) ?? PermissionPolicy.Unknown();
     private static readonly string[] MetadataProperties=["Name","FullName","Extension","Length","LastWriteTime","CreationTime","DirectoryName","LineNumber","Line","Filename","Path"];
     private static PermissionAssessment Unsupported(string reason)=>new("Unknown","需確認：未支援的指令形式",reason);
     private static PermissionAssessment UnsupportedFlag(string command,string argument)

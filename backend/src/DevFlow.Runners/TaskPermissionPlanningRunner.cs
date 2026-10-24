@@ -44,14 +44,15 @@ public sealed class TaskPermissionPlanningRunner(IPlanningRunner inner, ITaskToo
             {
                 while (true)
                 {
-                    var current = (await store.ListToolApprovalsAsync(taskId, timeout.Token)).Single(r => r.Id == request.Id);
+                    var current = await store.GetToolApprovalAsync(taskId, request.Id, timeout.Token)
+                        ?? throw new InvalidOperationException("找不到工具確認紀錄。");
                     if (current.State is "Allowed" or "AllowedByRule" or "AllowedByPolicy") return true;
                     if (current.State != "Pending")
                     {
                         Failure = current.State == "Denied" ? "你已拒絕本次工具操作，執行已停止。" : "工具確認已失效或執行已停止；此次沒有取得核准。";
                         return false;
                     }
-                    await Task.Delay(200, timeout.Token);
+                    await Task.Delay(500, timeout.Token);
                 }
             }
             catch (OperationCanceledException)

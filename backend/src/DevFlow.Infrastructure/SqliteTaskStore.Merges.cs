@@ -30,7 +30,16 @@ public sealed partial class SqliteTaskStore
             review?.Decision != ReviewDecision.Approve || !string.Equals(review.ResultCommit, resultCommit, StringComparison.OrdinalIgnoreCase))
             throw new ConflictException("Merge must target the latest approved run and commit.");
         var project = ReadOne<ProjectDefinition>(c, tx, "Projects", task.ProjectId)!;
-        var repositoryKey = Path.GetFullPath(project.RepositoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        using (var busy = Command(c, tx, "SELECT p.Payload FROM Tasks t JOIN Projects p ON p.Id=t.ProjectId WHERE t.Status IN ($running,$planning,$merging)",
+            ("$running", (int)Status.Running), ("$planning", (int)Status.Planning), ("$merging", (int)Status.Merging)))
+        using (var reader = busy.ExecuteReader()) while (reader.Read()) {
+            var activeProject = JsonSerializer.Deserialize<ProjectDefinition>(reader.GetString(0))!;
+            if (RepositoryIdentity.Key(activeProject.RepositoryPath).Equals(
+                RepositoryIdentity.Key(project.RepositoryPath),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                throw new ConflictException("此 Repository 尚有執行中的規劃或實作，請等待結束後再合併。");
+        }
+        var repositoryKey = RepositoryIdentity.Key(project.RepositoryPath);
         if (OperatingSystem.IsWindows()) repositoryKey = repositoryKey.ToUpperInvariant();
         using var active = Command(c, tx, "SELECT COUNT(*) FROM Merges WHERE RepositoryKey=$key AND State IN ('Pending','Uncertain')", ("$key", repositoryKey));
         if ((long)active.ExecuteScalar()! != 0) throw new ConflictException("Repository already has an active or unresolved merge.");

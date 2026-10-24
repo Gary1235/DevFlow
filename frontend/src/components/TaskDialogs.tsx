@@ -7,6 +7,7 @@ import { FolderPicker } from './FolderPicker';
 import { workflowTemplate } from './WorkflowEditor';
 import { cleanWorkflow } from './WorkflowPanel';
 import { ProjectExecutionFields } from './ProjectExecutionFields';
+import { ProjectDiagnostics } from './ProjectDiagnostics';
 import { readWorkflowPreference, saveWorkflowPreference } from '../workflowPreferences';
 import type {
   BaseData,
@@ -523,6 +524,9 @@ export function ProjectSettings({
           </div>
           <p className="footnote">僅影響之後建立的任務。</p>
           <ProjectExecutionFields profiles={validationProfiles} onProfiles={setValidationProfiles} defaultId={defaultValidationProfileId} onDefault={setDefaultValidationProfileId} services={previewServices} onServices={setPreviewServices}/>
+          <ProjectDiagnostics projectId={project.id} version={version} profiles={validationProfiles}
+            onValidation={p=>{if(validationProfiles.length<20){setValidationProfiles([...validationProfiles,p]);if(!defaultValidationProfileId)setDefaultValidationProfileId(p.id);}}}
+            onPreview={p=>{if(previewServices.length<4)setPreviewServices([...previewServices,p]);}}/>
         </div>
         <div className="dialog-footer">
           <button type="button" className="secondary" onClick={onClose}>

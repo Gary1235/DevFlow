@@ -36,4 +36,35 @@ public sealed class ExecutionSettingsApiTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Conflict,(await client.PostAsJsonAsync($"/api/tasks/{task.Id}/preview/start",new {runId=Guid.NewGuid(),resultCommit="x",expectedVersion=task.Version,projectVersion=1})).StatusCode);
         Assert.Empty(await store.ListRunsAsync(task.Id));
     }
+    [Fact] public async Task Probe_history_is_readable_but_cancellation_requires_an_explicit_same_origin_action()
+    {
+        var store = factory.Services.GetRequiredService<SqliteTaskStore>();
+        var project = new ProjectDefinition(Guid.NewGuid(), "Demo", root, "main", ["test"]); await store.AddProjectAsync(project);
+        var probe = new ValidationProbe(Guid.NewGuid(), "Completed", ProjectId: project.Id, ProfileName: "Build", CreatedAt: DateTimeOffset.UtcNow);
+        store.SaveValidationProbe(probe);
+        var history = await client.GetFromJsonAsync<ValidationProbe[]>($"/api/projects/{project.Id}/execution-probes");
+        Assert.Equal(probe.Id, Assert.Single(history!).Id);
+        var url = $"/api/execution-probes/{probe.Id}/cancel";
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new {})).StatusCode);
+        client.DefaultRequestHeaders.Add("X-DevFlow-Action", "1"); client.DefaultRequestHeaders.Add("Origin", "https://foreign.example");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new {})).StatusCode);
+        client.DefaultRequestHeaders.Remove("Origin");
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(url, new {})).StatusCode);
+        Assert.Equal("Completed", store.GetValidationProbe(probe.Id)!.State);
+    }
+    [Fact] public async Task New_diagnostic_and_recovery_actions_require_explicit_same_origin_requests()
+    {
+        var store=factory.Services.GetRequiredService<SqliteTaskStore>();
+        var project=new ProjectDefinition(Guid.NewGuid(),"Demo",root,"main",["test"]);await store.AddProjectAsync(project);
+        var input=new {expectedVersion=0,profile=new ValidationProfile("build","Build",".","node",["build.js"])};
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/projects/{project.Id}/execution-preflight",input)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/projects/{project.Id}/execution-probes",input)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/tasks/{Guid.NewGuid()}/recovery/preview",new {})).StatusCode);
+        client.DefaultRequestHeaders.Add("X-DevFlow-Action","1");client.DefaultRequestHeaders.Add("Origin","https://foreign.example");
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/projects/{project.Id}/execution-preflight",input)).StatusCode);
+        client.DefaultRequestHeaders.Remove("Origin");
+        Assert.Equal(HttpStatusCode.Conflict,(await client.PostAsJsonAsync($"/api/projects/{project.Id}/execution-preflight",new {expectedVersion=1,input.profile})).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,(await client.PostAsJsonAsync($"/api/projects/{project.Id}/execution-preflight",input)).StatusCode);
+        Assert.Empty(await store.ListTasksAsync());
+    }
 }

@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:backend": "node scripts/dev.mjs --backend-only",
-    "test:launcher": "node --test scripts/dev.test.mjs"
+    "test:launcher": "node --test scripts/dev.test.mjs",
+    "test:runtime": "node --test scripts/runtime.test.mjs"
   }
 }

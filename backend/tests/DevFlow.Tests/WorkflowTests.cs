@@ -192,6 +192,7 @@ public sealed class WorkflowTests : IAsyncLifetime
         await store.SaveTaskAsync(baseTask with { Ai = new(new("codex", "planner-model"), new("claude", "impl-model")), Version = baseTask.Version + 1 }, baseTask.Version);
         var plannerResponses = new Queue<string>([
             "{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"請依既有規則補上 ProblemDetails 回應格式\"}",
+            "{\"verdict\":\"Pass\",\"summary\":\"後端修正已通過檢查\"}",
             "{\"verdict\":\"NeedsUserConfirmation\",\"summary\":\"訂單金額超過上限時要阻擋還是需要主管簽核？規則庫未定義\"}",
             "{\"verdict\":\"Pass\",\"summary\":\"已依使用者確認完成前端實作\"}"
         ]);
@@ -206,6 +207,7 @@ public sealed class WorkflowTests : IAsyncLifetime
         await store.ContinueWorkflowAsync(baseTask.Id, pausedTask.Version, instructions: "超過上限直接阻擋並顯示提示訊息");
         await coordinator.ExecuteNextAsync();
         var completedTask = (await store.GetTaskAsync(baseTask.Id))!;
+        Assert.Equal("commit3", workspace.Sources.Last());
         Assert.Equal(Status.AwaitingReview, completedTask.Status);
         Assert.Equal(4, agent.Calls.Count);
         Assert.Contains("超過上限直接阻擋並顯示提示訊息", agent.Calls.Last().Task.TaskRules);
@@ -239,6 +241,90 @@ public sealed class WorkflowTests : IAsyncLifetime
             return Task.FromResult(new ValidationEvidence(0, 0, 0, [], [], "Command"));
         }
     }
+    [Fact] public async Task Unknown_supervision_verdict_cannot_complete_a_step()
+    {
+        var task = await Add(Step("backend"));
+        await store.SaveTaskAsync(task with { Ai = new(new("codex"), new("codex")), Version = task.Version + 1 }, task.Version);
+        await Coordinator(new QueuedReviewerFixture(new(["{\"verdict\":\"Typo\",\"summary\":\"looks fine\"}"]))).ExecuteNextAsync();
+        Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Empty((await store.GetTaskAsync(task.Id))!.StepResults ?? []);
+    }
+    [Fact] public async Task New_approval_summary_emoji_does_not_override_the_explicit_checkpoint_state()
+    {
+        var task = await Add(Step("backend"), Step("confirm", "Approval") with { Instructions = "⚠️ Check the result" }, Step("frontend"));
+        await Coordinator().ExecuteNextAsync();
+        var paused = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(Status.AwaitingStepApproval, paused.Status);
+        var resumed = await store.ContinueWorkflowAsync(task.Id, paused.Version);
+        Assert.Equal(2, resumed.StepResults!.Length);
+        Assert.Null(resumed.ResumeCommit);
+    }
+    [Fact] public async Task Custom_review_can_correct_and_review_again_within_the_configured_budget()
+    {
+        var task = await Add(Step("backend"), Step("review", "Review"));
+        await store.SaveTaskAsync(task with { Workflow = task.Workflow! with { MaxReviewRetries = 1 }, Version = task.Version + 1 }, task.Version);
+        await Coordinator(new QueuedReviewerFixture(new([
+            "{\"verdict\":\"NeedsChanges\",\"summary\":\"fix edge case\"}",
+            "{\"verdict\":\"Pass\",\"summary\":\"fixed\"}"]))).ExecuteNextAsync();
+        Assert.Equal(Status.AwaitingReview, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Equal(2, agent.Calls.Count);
+        Assert.Equal(2, Assert.Single(await store.ListRunsAsync(task.Id)).AiReviews!.Length);
+    }
+    [Fact] public async Task Oversized_supervision_diff_pauses_instead_of_passing()
+    {
+        var task = await Add(Step("backend"));
+        await store.SaveTaskAsync(task with { Ai = new(new("codex"), new("codex")), Version = task.Version + 1 }, task.Version);
+        await new ExecutionCoordinator(store, agent, workspace, new ValidatorFixture(),
+            new QueuedReviewerFixture(new()), new DiffFixture(new string('x', 120001))).ExecuteNextAsync();
+        var current = (await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(Status.AwaitingStepApproval, current.Status);
+        Assert.True(Assert.Single(current.StepResults!).RequiresRework);
+    }
+    [Fact] public async Task Failed_build_is_repaired_in_the_same_worktree_then_revalidated()
+    {
+        var task = await Add(Step("backend"));
+        var validator = new SequenceValidator([
+            new(0, 0, 0, [], [], "Command"),
+            new(1, 0, 0, [], [], "Command", "error CS1002: missing semicolon", "CommandFailed"),
+            new(0, 0, 0, [], [], "Command")]);
+        await Coordinator(validator: validator).ExecuteNextAsync();
+        Assert.Equal(Status.AwaitingReview, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Equal(2, agent.Calls.Count);
+        Assert.Equal(agent.Calls[0].Workspace, agent.Calls[1].Workspace);
+        Assert.Contains("CS1002", agent.Calls[1].Task.TaskRules);
+    }
+    [Fact] public async Task Guided_correction_cannot_drop_baseline_tests()
+    {
+        var task = await Add(Step("backend"));
+        await store.SaveTaskAsync(task with { Ai = new(new("codex"), new("codex")), Version = task.Version + 1 }, task.Version);
+        var baseline = new ValidationEvidence(0, 1, 0, ["existing-test"], []);
+        var validator = new SequenceValidator([baseline, baseline, new(0, 1, 0, ["replacement-test"], [])]);
+        await Coordinator(new QueuedReviewerFixture(new([
+            "{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"fix edge case\"}"])), validator).ExecuteNextAsync();
+        Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Empty((await store.GetTaskAsync(task.Id))!.StepResults ?? []);
+    }
+    [Fact] public async Task Repeated_build_error_stops_bounded_repairs()
+    {
+        var task = await Add(Step("backend"));
+        var failure = new ValidationEvidence(1, 0, 0, [], [], "Command", "error repeated", "CommandFailed");
+        await Coordinator(validator: new SequenceValidator([new(0, 0, 0, [], [], "Command"), failure, failure])).ExecuteNextAsync();
+        Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Equal(2, agent.Calls.Count);
+    }
+    [Fact] public async Task Environment_failure_does_not_trigger_agent_repairs()
+    {
+        var task = await Add(Step("backend"));
+        await Coordinator(validator: new SequenceValidator([new(0, 0, 0, [], [], "Command"),
+            new(1, 0, 0, [], [], "Command", "dependency preparation failed", "Environment")])).ExecuteNextAsync();
+        Assert.Equal(Status.Failed, (await store.GetTaskAsync(task.Id))!.Status);
+        Assert.Single(agent.Calls);
+    }
+    private sealed class SequenceValidator(ValidationEvidence[] results) : IValidationRunner
+    {
+        private int index;
+        public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p, Workspace w, Guid id, TddPhase phase, CancellationToken ct) => Task.FromResult(results[index++]);
+    }
     private sealed class AgentFixture : IAgentRunner
     {
         public List<(WorkTask Task, Workspace Workspace)> Calls = [];
@@ -259,8 +345,8 @@ public sealed class WorkflowTests : IAsyncLifetime
     private sealed class TddValidatorFixture(bool validRed) : IValidationRunner
     { public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p, Workspace w, Guid run, TddPhase phase, CancellationToken ct) =>
         Task.FromResult(phase == TddPhase.Red && validRed ? new ValidationEvidence(1, 1, 1, [], ["feature"]) : new ValidationEvidence(0, 2, 0, ["test", "feature"], [])); }
-    private sealed class DiffFixture : IResultDiffReader
-    { public Task<ResultDiff> ReadAsync(ProjectDefinition p, TaskRun run, CancellationToken ct) => Task.FromResult(new ResultDiff(run.Id, run.BaseCommit!, run.ResultCommit!, "+code")); }
+    private sealed class DiffFixture(string patch = "+code") : IResultDiffReader
+    { public Task<ResultDiff> ReadAsync(ProjectDefinition p, TaskRun run, CancellationToken ct) => Task.FromResult(new ResultDiff(run.Id, run.BaseCommit!, run.ResultCommit!, patch)); }
     private sealed class ReviewerFixture : IPlanningRunner
     { public Task<string> PlanAsync(WorkTask t, Workspace w, Guid run, CancellationToken ct) => Task.FromResult("{\"verdict\":\"NeedsChanges\",\"summary\":\"missing contract\"}"); }
     private sealed class QueuedReviewerFixture(Queue<string> responses) : IPlanningRunner

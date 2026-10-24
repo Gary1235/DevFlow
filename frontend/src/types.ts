@@ -16,7 +16,7 @@ export interface Review {id:string;decision:string;comments:string|null;resultCo
 export interface Merge {id:string;state:string;expectedTargetCommit:string;resultCommit:string;error:string|null;startedAt:string}
 export interface Artifact {path:string;bytes:number}
 export interface ArtifactPage {path:string;text:string;offset:number;nextOffset:number;hasMore:boolean}
-export interface Validation {phase:string;exitCode:number;total:number;failed:number;evidencePath:string;stepId?:string|null;kind?:string;error?:string|null}
+export interface Validation {phase:string;exitCode:number;total:number;failed:number;evidencePath:string;stepId?:string|null;kind?:string;error?:string|null;attempt?:number;origin?:string}
 export interface Diff {baseCommit:string;resultCommit:string;patch:string}
 export interface GitState {branch:string;headCommit:string;clean:boolean}
 export interface Diagnostic {version:string|null;loginState:string;executionState:string;message:string;errorCode?:string|null;exitCode?:number|null;lastVerifiedAt?:string|null;verifiedModel?:string|null;verificationSource?:string|null;verificationObservedAt?:string|null}

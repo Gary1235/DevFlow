@@ -55,8 +55,14 @@ builder.Services.AddSingleton(sp => new CliMaintenance(sp.GetRequiredService<IPr
     }, cliControl, builder.Configuration["DevFlow:NodeExecutable"], builder.Configuration["DevFlow:NpmCliPath"], builder.Configuration["DevFlow:NpmGlobalRoot"]));
 var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
 builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts,
-    permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location, verifications: sp.GetRequiredService<SqliteTaskStore>()));
+    permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location, verifications: sp.GetRequiredService<SqliteTaskStore>(),
+    structuredTools: builder.Configuration.GetValue("DevFlow:StructuredToolsEnabled", true) ? new StructuredToolFactory(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts) : null));
 var collaborationWorktrees = Path.GetFullPath(builder.Configuration["DevFlow:WorktreeRoot"] ?? Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "DevFlow.Worktrees"));
+builder.Services.AddSingleton<ProjectInspector>();
+builder.Services.AddSingleton(sp => new WorkspaceRecoveryService(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationWorktrees, collaborationArtifacts));
+builder.Services.AddSingleton(sp => new ValidationProbeService(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationWorktrees,
+    collaborationArtifacts, sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping));
+builder.Services.AddHostedService<ValidationProbeLifetime>();
 builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(sp.GetRequiredService<IProcessRunner>(),
     collaborationWorktrees));
 builder.Services.AddSingleton(sp => new TaskPreviewManager(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationWorktrees));
@@ -145,7 +151,7 @@ app.MapGet("/api/tasks/{id:guid}", async (Guid id, ITaskStore store, Cancellatio
 app.MapGet("/api/tasks/{id:guid}/permissions", async (Guid id, SqliteTaskStore store, CancellationToken ct) =>
 {
     await Find(id, store, ct);
-    return Results.Ok(await store.ListToolApprovalsAsync(id, ct));
+    return Results.Ok(await store.RecentToolApprovalsAsync(id, ct));
 });
 app.MapPost("/api/tasks/{id:guid}/permissions/{requestId:guid}", async (Guid id, Guid requestId, ToolApprovalReply input, HttpContext context, SqliteTaskStore store, CancellationToken ct) =>
 {
@@ -204,6 +210,7 @@ app.MapStorageEndpoints();
 app.MapExecutionSettingsEndpoints();
 app.MapPreviewEndpoints();
 app.MapToolPermissionEndpoints();
+app.MapRecoveryEndpoints();
 app.Run();
 static async Task<WorkTask> Find(Guid id, ITaskStore store, CancellationToken ct) =>
     await store.GetTaskAsync(id, ct) ?? throw new MissingEntityException("Task not found.");

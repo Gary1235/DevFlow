@@ -16,6 +16,7 @@ public static class RetryStrategy
         var source = scope == "Restart" ? task.ExecutionBaseCommit ?? task.Plan.BaseCommit :
             partial ? completed.LastOrDefault()?.ResultCommit ?? task.RevisionCommit ?? task.Plan.BaseCommit :
             task.RevisionCommit ?? task.Plan.BaseCommit;
+        if (scope == "Resume") source = task.ResumeCommit ?? source;
         source ??= task.ExecutionBaseCommit;
         return new(scope, task.Version,
             partial ? "保留已完成步驟，從失敗步驟重新開始；該步驟內的測試與實作會重跑。" :

@@ -21,6 +21,7 @@ import { TaskActivity } from './LiveActivity';
 import { TitleActivity, taskTitleState, useActivityPageTitle } from './TitleActivity';
 import { FailureRecovery, TaskModelSettings } from './FailureRecovery';
 import { RetryPanel } from './RetryPanel';
+import { WorkspaceRecovery } from './WorkspaceRecovery';
 import { TaskPreview } from './TaskPreview';
 import { WorkflowSettings } from './WorkflowPanel';
 import { TaskPermissions } from './TaskPermissions';
@@ -912,9 +913,9 @@ function ExecutionPanel({ data }: { data: DetailData }) {
               <div className="phase-grid">
                 {(data.task.policy?.tdd === false ? ['Baseline', 'Implementation'] : phases).map(
                   phaseName => {
-                    const matchedValidation = evidenceResource.data?.find(
-                      validationItem => validationItem.phase === phaseName
-                    );
+                    const matchedValidation = evidenceResource.data?.filter(
+                      validationItem => validationItem.phase === phaseName && validationItem.origin !== 'StructuredTool'
+                    ).at(-1);
                     const stateInfo = validationState(matchedValidation);
                     const isPhaseRunning =
                       !currentRun.finishedAt &&
@@ -954,7 +955,7 @@ function ExecutionPanel({ data }: { data: DetailData }) {
                 {evidenceResource.data?.map(validationItem => (
                   <div
                     className={'phase-card tone-' + validationState(validationItem).tone}
-                    key={(validationItem.stepId || '') + validationItem.phase}
+                    key={validationItem.evidencePath}
                   >
                     <strong>
                       {data.task.workflow?.steps?.find(
@@ -962,6 +963,7 @@ function ExecutionPanel({ data }: { data: DetailData }) {
                       )?.name || '驗證'}{' '}
                       · {validationItem.phase}
                     </strong>
+                    <p>{validationItem.origin==='StructuredTool'?'AI 工具自行驗證':validationItem.attempt?`修正後驗證 · 第 ${validationItem.attempt} 輪`:'系統驗證'}</p>
                     <p>
                       {validationState(validationItem).label}{validationItem.kind==='Command'?` · 退出碼 ${validationItem.exitCode}`:` · ${validationItem.total} 個測試 · ${validationItem.failed} 個失敗`}
                     </p>
@@ -1059,11 +1061,19 @@ function MergeDialog({
         <p className="footnote">
           僅進行本地 fast-forward 合併，不推送遠端。HEAD 改變時後端會拒絕合併。
         </p>
+        <p>若目標分支已前進，可建立獨立整合任務，重新驗證與審查後再合併。</p>
       </div>
       <div className="dialog-footer">
         <button className="secondary" onClick={onClose}>
           取消
         </button>
+        <button className="secondary" disabled={!gitStateResource.data||action.busy||gitStateResource.data.branch!==project?.baseBranch}
+          onClick={()=>void action.run(async()=>{
+            const created=await api<WorkTask>('/api/tasks/'+snapshot.taskId+'/integrate','POST',{
+              expectedVersion:snapshot.version,runId:snapshot.runId,resultCommit:snapshot.resultCommit,expectedTargetCommit:gitStateResource.data!.headCommit,
+            });
+            notice('整合任務已排隊；原成果保留，完成後需要重新審核。');onMerged();onClose();location.hash='#task/'+created.id;
+          })}>建立整合與重驗證任務</button>
         <button
           className="primary"
           disabled={!isMergeAllowed || action.busy}
@@ -1584,7 +1594,7 @@ export function TaskDetail({
       )}
       {isRetryOpen &&
         ['Failed', 'Rejected'].includes(currentTask.status) &&
-        currentTask.plan && <RetryPanel task={currentTask} onChanged={handleChanged} />}
+        currentTask.plan && <><RetryPanel task={currentTask} onChanged={handleChanged} />{currentTask.status==='Failed'&&<WorkspaceRecovery task={currentTask} onChanged={handleChanged}/>}</>}
       <TaskContext task={currentTask} onChanged={handleChanged} />
       {isModelOpen && (
         <TaskModelSettings

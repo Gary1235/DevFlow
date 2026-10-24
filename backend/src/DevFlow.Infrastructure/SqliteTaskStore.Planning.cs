@@ -18,9 +18,8 @@ public sealed partial class SqliteTaskStore
     public Task<TaskClaim?> ClaimPlanningAsync(CancellationToken ct = default)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
-        using var next = Command(c, tx, "SELECT Payload FROM Tasks WHERE Status=$status ORDER BY CreatedAt,Id LIMIT 1", ("$status", (int)Status.PlanningQueued));
-        if (next.ExecuteScalar() is not string json) return Task.FromResult<TaskClaim?>(null);
-        var task = JsonSerializer.Deserialize<WorkTask>(json)!;
+        var task = NextForRepository(c, tx, Status.PlanningQueued);
+        if (task is null) return Task.FromResult<TaskClaim?>(null);
         var running = task with { Status = Status.Planning, Version = task.Version + 1 };
         UpdateTask(c, tx, running, task.Version);
         var run = new TaskRun(Guid.NewGuid(), task.Id, "Planning", null, null, null, null, DateTimeOffset.UtcNow, null, RunKind.Planning,

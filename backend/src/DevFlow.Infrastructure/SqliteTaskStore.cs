@@ -57,9 +57,15 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, I
             CREATE TABLE IF NOT EXISTS ToolApprovals(Id TEXT PRIMARY KEY, TaskId TEXT NOT NULL REFERENCES Tasks(Id),
                 RunId TEXT NOT NULL REFERENCES Runs(Id), Payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_ToolApprovals_Task ON ToolApprovals(TaskId);
+            CREATE INDEX IF NOT EXISTS IX_ToolApprovals_State ON ToolApprovals(json_extract(Payload,'$.State'),RunId);
+            CREATE INDEX IF NOT EXISTS IX_ToolApprovals_Run ON ToolApprovals(TaskId,RunId);
+            CREATE INDEX IF NOT EXISTS IX_ToolApprovals_PendingTask ON ToolApprovals(TaskId) WHERE json_extract(Payload,'$.State')='Pending';
             CREATE TABLE IF NOT EXISTS ToolPermissionRules(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS PermissionPolicies(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS CliVerifications(Provider TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ValidationProbes(Id TEXT PRIMARY KEY, ProjectId TEXT NOT NULL REFERENCES Projects(Id),
+                State TEXT NOT NULL, CreatedAt TEXT NOT NULL, Payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS IX_ValidationProbes_Project ON ValidationProbes(ProjectId,CreatedAt);
             """);
         var tdd = new RuleDefinition(Guid.Parse("90d978ec-8485-4e0c-a90d-31a333881955"), "TDD 模式",
             "依序執行 Baseline、Red、Green、Refactor；保留既有測試，不得刪除、略過或弱化斷言。Red 必須有實際失敗測試，後續階段必須通過。",
@@ -121,10 +127,8 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, I
     {
         using var c = Open(ct);
         using var tx = c.BeginTransaction();
-        using var command = Command(c, tx, "SELECT Payload FROM Tasks WHERE Status=$status ORDER BY CreatedAt,Id LIMIT 1", ("$status", (int)Status.Queued));
-        var payload = command.ExecuteScalar() as string;
-        if (payload is null) return Task.FromResult<TaskClaim?>(null);
-        var current = JsonSerializer.Deserialize<WorkTask>(payload)!;
+        var current = NextForRepository(c, tx, Status.Queued);
+        if (current is null) return Task.FromResult<TaskClaim?>(null);
         var running = current with { Status = Status.Running, Version = current.Version + 1 };
         UpdateTask(c, tx, running, current.Version);
         var run = new TaskRun(Guid.NewGuid(), current.Id, "Running", null, null, null, null, DateTimeOffset.UtcNow, null,

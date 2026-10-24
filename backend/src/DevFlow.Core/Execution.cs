@@ -4,7 +4,7 @@ public enum TddPhase { Baseline, Red, Green, Refactor, Implementation }
 public sealed record Workspace(string Path, string BaseCommit);
 public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 public sealed record ValidationEvidence(int ExitCode, int Total, int Failed, string[] PassedTests, string[] FailedTests,
-    string Kind = "DotnetTest", string? Error = null);
+    string Kind = "DotnetTest", string? Error = null, string? FailureKind = null);
 public interface IAgentRunner
 {
     Task ExecuteAsync(WorkTask task, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct);
@@ -20,9 +20,17 @@ public interface IValidationRunner
 {
     Task<ValidationEvidence> ValidateAsync(ProjectDefinition project, Workspace workspace, Guid runId, TddPhase phase, CancellationToken ct);
 }
+public interface IIntegrationWorkspaceManager
+{
+    Task<string[]> IntegrateAsync(Workspace workspace, string sourceCommit, CancellationToken ct);
+}
 public interface IStepValidationRunner
 {
     IValidationRunner ForStep(Guid stepId);
+}
+public interface IValidationAttemptRunner
+{
+    IValidationRunner ForAttempt(int attempt);
 }
 public interface IProcessRunner
 {
@@ -47,7 +55,7 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
             await using var activity = new TaskActivityReporter(store, claim.Run.Id);
             await activity.StageAsync("準備實作工作目錄", ct);
             var project = await store.GetProjectAsync(claim.Task.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
-            var baseCommit = claim.Task.StepResults?.LastOrDefault()?.ResultCommit ?? claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
+            var baseCommit = claim.Task.ResumeCommit ?? claim.Task.StepResults?.LastOrDefault()?.ResultCommit ?? claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
             var source = baseCommit is { } revision ? project with { BaseBranch = revision } : project;
             workspace = await workspaces.CreateAsync(source, claim.Run.Id, ct);
             executionBase ??= workspace.BaseCommit;
@@ -57,6 +65,9 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
                 var current = await store.GetTaskAsync(claim.Task.Id, ct) ?? throw new MissingEntityException("Task not found.");
                 if (current.Status == TaskStatus.Cancelled) throw new OperationCanceledException("Task cancelled.");
                 await store.SaveTaskAsync(current with { ExecutionBaseCommit = executionBase, Version = current.Version + 1 }, current.Version, ct);
+            }
+            if (claim.Task.Integration is not null) {
+                await ExecuteIntegrationAsync(claim, project, workspace, executionBase, activity, ct); return true;
             }
             if (claim.Task.Workflow?.Steps is not null)
             {
@@ -72,6 +83,7 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
             if (claim.Task.Policy?.Tdd != false && baseline.Kind != "DotnetTest") throw new InvalidOperationException("TDD 需要 DotnetTest 逐項測試結果；一般指令請使用標準實作模式。");
             await store.AppendEventAsync(claim.Task.Id, "PhaseVerified", TddPhase.Baseline.ToString(), ct);
             string[] redTests = [];
+            var executionTask = TaskInstructions.WithValidationCommands(claim.Task, project);
             var policy = claim.Task.Policy ?? new ExecutionPolicy();
             if (policy.AllowedPaths is { Length: > 0 } && guard is null) throw new InvalidOperationException("An edit scope guard is required.");
             foreach (var phase in policy.Tdd ? new[] { TddPhase.Red, TddPhase.Green, TddPhase.Refactor } : [TddPhase.Implementation])
@@ -81,10 +93,13 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
                     throw new OperationCanceledException("Task cancelled.");
                 await store.AppendEventAsync(claim.Task.Id, "PhaseStarted", phase.ToString(), ct);
                 await activity.StageAsync("AI 實作 · " + phase, ct);
-                await agent.ExecuteAsync(claim.Task, workspace, claim.Run.Id, phase, ct);
+                await agent.ExecuteAsync(executionTask, workspace, claim.Run.Id, phase, ct);
                 await activity.StageAsync("檢查變更並執行測試 · " + phase, ct);
                 if (guard is not null) await guard.CheckAsync(workspace with { BaseCommit = executionBase }, policy, ct);
-                var evidence = await validation.ValidateAsync(project, workspace, claim.Run.Id, phase, ct);
+                var evidence = await ValidateWithRepairsAsync(executionTask, project, workspace, claim.Run.Id, phase,
+                    validation, baseline.PassedTests.Concat(redTests), async token => {
+                        if (guard is not null) await guard.CheckAsync(workspace with { BaseCommit = executionBase }, policy, token);
+                    }, ct);
                 validationSummary.Add($"{phase}: exit {evidence.ExitCode}, total {evidence.Total}, failed {evidence.Failed}; passed IDs: {string.Join(", ", evidence.PassedTests.Take(100))}; failed IDs: {string.Join(", ", evidence.FailedTests.Take(100))}");
                 if (phase == TddPhase.Red)
                 {

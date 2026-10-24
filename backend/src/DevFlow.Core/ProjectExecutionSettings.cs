@@ -7,6 +7,10 @@ public sealed record PreviewService(string Id, string Name, string WorkingDirect
 
 public static class ProjectExecutionSettings
 {
+    public static ValidationProfile? FindValidation(ProjectDefinition project, string id) =>
+        (project.ValidationProfiles ?? []).FirstOrDefault(p => p.Id == id) ??
+        (id == "legacy-dotnet-test" && project.DefaultValidationProfileId is null
+            ? new("legacy-dotnet-test", "專案 .NET 測試", ".", "dotnet", project.ValidationArguments, "DotnetTest") : null);
     public static ValidationProfile[] Normalize(ValidationProfile[]? profiles)
     {
         if ((profiles?.Length ?? 0) > 20) throw new ArgumentException("最多 20 組驗證設定。");

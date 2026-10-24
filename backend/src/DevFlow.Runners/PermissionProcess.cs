@@ -7,7 +7,7 @@ namespace DevFlow.Runners;
 
 // Translate each CLI's native approval protocol. Decisions are always one-use;
 // DevFlow owns task/project rules rather than mutating the CLI's global settings.
-internal sealed class PermissionProcess(IProcessRunner inner, string provider, IToolApprovalOperation operation) : IProcessRunner
+internal sealed class PermissionProcess(IProcessRunner inner, string provider, IToolApprovalOperation operation, IStructuredTools? structuredTools = null) : IProcessRunner
 {
     private static string? Option(IReadOnlyList<string> args, string key)
     { for (var i = 0; i + 1 < args.Count; i++) if (args[i] == key) return args[i + 1]; return null; }
@@ -66,15 +66,23 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
         string? answer = null;
         var result = await process.RunInteractiveAsync(executable, command, cwd, async (s, token) =>
         {
-            await Send(s, 1, "initialize", new { clientInfo = new { name = "devflow", title = "DevFlow", version = "0.7.0" } }, token);
+            var initialization = new Dictionary<string, object> { ["clientInfo"] = new { name = "devflow", title = "DevFlow", version = "0.7.0" } };
+            if (structuredTools is not null) initialization["capabilities"] = new { experimentalApi = true };
+            await Send(s, 1, "initialize", initialization, token);
             await Response(s, 1, token); await s.SendAsync(new { method = "initialized", @params = new { } }, token);
-            await Send(s, 2, "thread/start", new { cwd, model = Option(args, "--model"), ephemeral = true, approvalPolicy = "on-request",
-                sandbox = operation.ReadOnly ? "read-only" : "workspace-write" }, token);
+            var threadOptions = new Dictionary<string, object?> { ["cwd"] = cwd, ["model"] = Option(args, "--model"), ["ephemeral"] = true,
+                ["approvalPolicy"] = "on-request", ["sandbox"] = operation.ReadOnly ? "read-only" : "workspace-write" };
+            if (structuredTools is not null) threadOptions["dynamicTools"] = structuredTools.Definitions;
+            await Send(s, 2, "thread/start", threadOptions, token);
             var thread = (await Response(s, 2, token)).GetProperty("thread").GetProperty("id").GetString()!;
             JsonElement? schema = null;
             if (Option(args, "--output-schema") is { } file) { using var json = JsonDocument.Parse(await File.ReadAllTextAsync(file, token)); schema = json.RootElement.Clone(); }
+            if (structuredTools is not null) prompt += "\nPrefer devflow_read_file, devflow_list_files and devflow_search for literal worktree operations. " +
+                "Use devflow_write_file for scoped file updates and devflow_run_validation with a saved profileId when available. " +
+                "These host tools avoid shell parsing; do not wrap them in shell commands. A tool error does not authorize bypassing its restrictions.";
             await Send(s, 3, "turn/start", new { threadId = thread, input = new[] { new { type = "text", text = prompt } }, outputSchema = schema }, token);
             string? turn = null; var deltas = new StringBuilder(); var items = new Dictionary<string, JsonElement>();
+            var toolCalls = new HashSet<string>();
             while (true)
             {
                 var frame = await Read(s, token);
@@ -96,7 +104,21 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                 if (frame.TryGetProperty("id", out var request))
                 {
                     object decision;
-                    if (name == "item/commandExecution/requestApproval")
+                    if (name == "item/tool/call" && structuredTools is not null)
+                    {
+                        if (Text(p, "threadId") != thread || turn is null || Text(p, "turnId") != turn || Text(p, "namespace") is not null ||
+                            Text(p, "callId") is not { Length: > 0 } callId || !toolCalls.Add(callId))
+                            throw new InvalidOperationException("Structured tool request identity mismatch or duplicate call.");
+                        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, s.ProcessExited);
+                        try {
+                            var output = await structuredTools.ExecuteAsync(Text(p, "tool") ?? "", Object(p, "arguments"), lifetime.Token);
+                            decision = new { success = true, contentItems = new[] { new { type = "inputText", text = output } } };
+                        }
+                        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or UnauthorizedAccessException or MissingEntityException or ConflictException) {
+                            decision = new { success = false, contentItems = new[] { new { type = "inputText", text = ex.Message } } };
+                        }
+                    }
+                    else if (name == "item/commandExecution/requestApproval")
                     {
                         if (p.TryGetProperty("availableDecisions",out var available) && !available.EnumerateArray().Any(x=>x.ValueKind==JsonValueKind.String&&x.GetString()=="accept"))
                             throw new InvalidOperationException("CLI 未提供單次允許選項，無法核准這次敏感操作。");

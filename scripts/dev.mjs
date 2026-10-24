@@ -9,7 +9,7 @@ export function devPaths(root,env={}){
   const database=path.resolve(root,env.DevFlow__DatabasePath||'backend/src/DevFlow.Api/.data/devflow.db');
   const data=path.dirname(database);
   return {database,artifacts:path.resolve(root,env.DevFlow__ArtifactsRoot||path.join(data,'artifacts')),
-    worktrees:path.resolve(root,env.DevFlow__WorktreeRoot||(env.DevFlow__DatabasePath?path.join(data,'worktrees'):path.join(root,'backend/src/DevFlow.Worktrees'))),
+    worktrees:path.resolve(root,env.DevFlow__WorktreeRoot||(env.DevFlow__DatabasePath?path.join(data,'worktrees'):root+'.worktrees')),
     cliControl:path.resolve(root,env.DevFlow__CliControlRoot||path.join(data,'cli-control'))};
 }
 export function sameDatabase(actual,expected){
@@ -26,8 +26,12 @@ export async function readStatus(origin){
 
 async function main(){
   const flags=new Set(process.argv.slice(2));
-  for(const flag of flags)if(!['--backend-only','--no-build'].includes(flag))throw new Error('不支援的參數：'+flag);
+  for(const flag of flags)if(!['--backend-only','--no-build','--notify'].includes(flag))throw new Error('不支援的參數：'+flag);
+  const notify=flags.has('--notify')||process.env.DEVFLOW_PERMISSION_NOTIFICATIONS==='1';
+  if(notify&&process.platform!=='win32')throw new Error('開發版背景通知目前僅支援 Windows。');
   const paths=devPaths(repository,process.env);
+  const configuration=process.env.DEVFLOW_BUILD_CONFIGURATION||'Release';
+  if(!['Debug','Release'].includes(configuration))throw new Error('DEVFLOW_BUILD_CONFIGURATION 僅支援 Debug 或 Release。');
   const origin=process.env.DevFlow__ApiUrl||'http://127.0.0.1:5180';
   const parsed=new URL(origin);
   if(parsed.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(parsed.hostname))throw new Error('開發啟動器僅支援本機 HTTP API。');
@@ -46,11 +50,11 @@ async function main(){
   async function stop(code=0){
     if(stopping)return;stopping=true;
     process.stdin.pause();
-    for(const name of ['Worker','Web','Api']){
+    for(const name of ['Worker','Web','Notifier','Api']){
       const entry=children.find(c=>c.name===name);
       if(!entry||!entry.child.pid||entry.child.exitCode!==null||entry.child.signalCode!==null)continue;
       const exited=new Promise(resolve=>entry.child.once('exit',resolve));
-      if(name==='Web')entry.child.kill();
+      if(name==='Web'||name==='Notifier')entry.child.kill();
       else if(entry.child.stdin.writable)entry.child.stdin.end('shutdown\n');
       const timer=setTimeout(()=>{if(entry.child.exitCode===null)entry.child.kill();},15000);
       await exited;clearTimeout(timer);
@@ -63,8 +67,8 @@ async function main(){
     child.stdin.on('error',()=>{});
     child.stdout.pipe(log,{end:false});child.stderr.pipe(log,{end:false});
     children.push({name,child});
-    child.on('error',error=>{console.error(`${name} 啟動失敗：${error.message}`);log.end();void stop(1);});
-    child.on('exit',code=>{log.end();if(!stopping){console.error(`${name} 已結束（${code}），請查看 ${logRoot}`);void stop(1);}});
+    child.on('error',error=>{console.error(`${name} 啟動失敗：${error.message}`);log.end();if(name!=='Notifier')void stop(1);});
+    child.on('exit',code=>{log.end();if(!stopping){console.error(`${name} 已結束（${code}），請查看 ${logRoot}`);if(name!=='Notifier')void stop(1);}});
     return child;
   }
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -85,7 +89,7 @@ async function main(){
   }
   async function build(project){
     await new Promise((resolve,reject)=>{
-      const child=spawn('dotnet',['build',path.join(repository,`backend/src/DevFlow.${project}`),'-c','Release','--nologo','-m:1','/nr:false'],{cwd:repository,env,windowsHide:true,stdio:'inherit'});
+      const child=spawn('dotnet',['build',path.join(repository,`backend/src/DevFlow.${project}`),'-c',configuration,'--nologo','-m:1','/nr:false'],{cwd:path.join(repository,'backend'),env,windowsHide:true,stdio:'inherit'});
       child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(new Error(project+' 建置失敗')));
     });
   }
@@ -102,7 +106,7 @@ async function main(){
       if(!existing?.online)await build('Worker');
     }
     if(stopping)return;
-    const binary=name=>path.join(repository,`backend/src/DevFlow.${name}/bin/Release/net10.0/DevFlow.${name}${process.platform==='win32'?'.exe':''}`);
+    const binary=name=>path.join(repository,`backend/src/DevFlow.${name}/bin/${configuration}/net10.0/DevFlow.${name}${process.platform==='win32'?'.exe':''}`);
     if(!existing){
       launch('Api',binary('Api'),[],path.join(repository,'backend/src/DevFlow.Api'));
       await waitFor(async()=>{try{return sameDatabase((await readStatus(origin)).databasePath,paths.database);}catch{return false;}},'API');
@@ -111,6 +115,8 @@ async function main(){
       launch('Worker',binary('Worker'),[],path.join(repository,'backend/src/DevFlow.Worker'));
       await waitFor(async()=>{try{return (await readStatus(origin)).online;}catch{return false;}},'Worker');
     }else console.log('沿用同一資料庫的 Worker。');
+    if(notify)launch('Notifier',path.join(process.env.SystemRoot||'C:/Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),
+      ['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-File',path.join(repository,'scripts/permission-notifier.ps1'),'-ApiUrl',parsed.origin,'-WebUrl',web,'-OwnerProcessId',String(process.pid)],repository);
     if(!flags.has('--backend-only')){
       let reuseWeb=false;
       try{reuseWeb=sameDatabase((await readStatus(web)).databasePath,paths.database);}catch{}

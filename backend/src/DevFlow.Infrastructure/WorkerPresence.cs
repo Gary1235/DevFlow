@@ -27,6 +27,7 @@ public sealed partial class SqliteTaskStore
             "Waiting" => "Worker 已連線，正在等待 CLI 更新或作業鎖定解除。",
             "Error" => "Worker 已連線，但執行器發生錯誤；請查看 Worker 紀錄。",
             "Working" => "Worker 已連線，正在處理任務。",
+            "WaitingPermission" => "Worker 已連線，有任務等待工具核准；其他獨立專案仍可執行。",
             _ => "Worker 已連線，等待領取任務。"
         };
         return Task.FromResult(new WorkerPresence(online, online ? pulse!.State : "Offline", message, pulse?.UpdatedAt, now, path));

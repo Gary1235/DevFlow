@@ -48,6 +48,8 @@ public sealed partial class SqliteTaskStore
         if (step?.Id != result.StepId || result.RunId != runId) throw new ConflictException("流程步驟已改變。");
         if (result.State is not ("Running" or "Completed" or "Failed")) throw new ArgumentException("Invalid step state.");
         var updated = task with { Version = task.Version + 1, ActiveStepId = result.State == "Running" ? step.Id : null,
+            ResumeCommit = result.State == "Completed" ? null : task.ResumeCommit,
+            Recovery = result.State == "Completed" && task.Recovery?.StepId == result.StepId ? task.Recovery with { Applied = true } : task.Recovery,
             StepResults = result.State == "Completed" ? [.. completed, result] : completed };
         var updatedRun = run with { Steps = [.. (run.Steps ?? []).Where(s => s.StepId != result.StepId), result],
             ResultCommit = result.State == "Completed" ? result.ResultCommit : run.ResultCommit };
@@ -78,7 +80,8 @@ public sealed partial class SqliteTaskStore
             throw new ConflictException("任務狀態已改變，請重新讀取。");
         var completedResults = task.StepResults ?? [];
         var lastResult = completedResults.LastOrDefault();
-        var requiresStepReRun = lastResult?.Summary?.StartsWith("⚠️", StringComparison.Ordinal) == true;
+        // Keep compatibility with pauses saved before RequiresRework existed.
+        var requiresStepReRun = lastResult?.RequiresRework == true || lastResult?.RequiresRework is null && lastResult?.Summary?.StartsWith("⚠️", StringComparison.Ordinal) == true;
         var effectiveResults = requiresStepReRun ? completedResults[..^1] : completedResults;
         var finished = effectiveResults.Length == task.Workflow?.Steps?.Length;
         var updatedTaskRules = task.TaskRules;
@@ -104,6 +107,7 @@ public sealed partial class SqliteTaskStore
             StepResults = effectiveResults,
             TaskRules = updatedTaskRules,
             RevisionCommit = requiresStepReRun ? lastResult?.ResultCommit ?? task.RevisionCommit : task.RevisionCommit,
+            ResumeCommit = requiresStepReRun ? lastResult?.ResultCommit : null,
             Version = task.Version + 1
         };
         UpdateTask(c, tx, updated, task.Version);

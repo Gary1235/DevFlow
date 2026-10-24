@@ -10,6 +10,7 @@ import { RulesLibrary } from './components/RulesLibrary';
 import { StoragePage } from './components/StoragePage';
 import { WorkerConnection } from './components/WorkerStatus';
 import { PermissionSettings } from './components/PermissionSettings';
+import { PendingPermissions } from './components/PendingPermissions';
 import { TitleActivity, taskTitleState } from './components/TitleActivity';
 import type { BaseData, Project, WorkTask } from './types';
 
@@ -241,6 +242,7 @@ function Workbench() {
         </header>
 
         <main>
+          <PendingPermissions/>
           {base.error && (
             <div className="offline">
               <strong>{base.error}</strong>

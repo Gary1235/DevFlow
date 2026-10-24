@@ -94,6 +94,7 @@ public sealed class TrustedValidationPermissionTests : IDisposable
         await store.SetExecutionSettingsAsync(project.Id, 0, [], null, [], null);
         await new SqliteTaskStore(store.DatabasePath).AddToolApprovalAsync(Request());
         Assert.Equal("Pending", (await store.ListToolApprovalsAsync(task.Id)).Last().State);
+        await store.CompleteRunAsync(claim.Run.Id, false, root, "base", null, "End first run before reusing the repository");
         var other = new ProjectDefinition(Guid.NewGuid(), "Other", root, "main", ["test"]); await store.AddProjectAsync(other);
         var otherTask = WorkTask.Create(other.Id, "Other", "Implement", "Validate").SetPlan("Implement changes and run tests.").ApprovePlan();
         await store.AddTaskAsync(otherTask); var otherClaim = (await store.ClaimNextAsync())!;

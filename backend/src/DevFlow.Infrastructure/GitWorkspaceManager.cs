@@ -1,6 +1,6 @@
 using DevFlow.Core;
 namespace DevFlow.Infrastructure;
-public sealed class GitWorkspaceManager(IProcessRunner process, string root) : IWorkspaceManager
+public sealed class GitWorkspaceManager(IProcessRunner process, string root) : IWorkspaceManager, IIntegrationWorkspaceManager
 {
     public async Task<Workspace> CreateAsync(ProjectDefinition project, Guid runId, CancellationToken ct)
     {
@@ -23,6 +23,16 @@ public sealed class GitWorkspaceManager(IProcessRunner process, string root) : I
         await Git(workspace.Path, ct, "-c", "user.name=DevFlow", "-c", "user.email=devflow@localhost",
             "commit", "--allow-empty", "-m", "DevFlow: validated TDD result");
         return (await Git(workspace.Path, ct, "rev-parse", "HEAD")).Trim();
+    }
+    public async Task<string[]> IntegrateAsync(Workspace workspace, string sourceCommit, CancellationToken ct)
+    {
+        sourceCommit = GitCommit.Require(sourceCommit);
+        var result = await process.RunAsync("git", ["-c", "merge.autoStash=false", "-c", "user.name=DevFlow", "-c", "user.email=devflow@localhost",
+            "merge", "--no-commit", "--no-ff", "--no-edit", "--no-autostash", "--no-overwrite-ignore", sourceCommit], workspace.Path, null, ct);
+        var unresolved = await Git(workspace.Path, ct, "diff", "--name-only", "--diff-filter=U", "-z");
+        var conflicts = unresolved.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        if (result.ExitCode != 0 && conflicts.Length == 0) throw new InvalidOperationException("隔離副本整合失敗：" + result.StandardError);
+        return conflicts;
     }
     private async Task<string> Git(string directory, CancellationToken ct, params string[] args)
     {
@@ -50,5 +60,13 @@ public sealed class GitWorkspaceManager(IProcessRunner process, string root) : I
         {
             // Retain worktree if git cleanup fails so StorageManager or human inspection can handle it.
         }
+    }
+    public async Task RemoveScratchAsync(ProjectDefinition project, Workspace workspace, Guid id, CancellationToken ct)
+    {
+        var expected = Path.GetFullPath(Path.Combine(root, id.ToString("N")));
+        if (!Path.GetFullPath(workspace.Path).Equals(expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) ||
+            File.GetAttributes(expected).HasFlag(FileAttributes.ReparsePoint)) throw new ArgumentException("暫存副本路徑無法核對。");
+        await Git(project.RepositoryPath, ct, "worktree", "remove", "--force", "--", expected);
+        await Git(project.RepositoryPath, ct, "branch", "-D", "devflow/" + id.ToString("N"));
     }
 }

@@ -35,17 +35,25 @@ public sealed class RunArtifactReader(string root) : IRunArtifactReader
     {
         var results = new List<ValidationSummary>();
         var runRoot = RunRoot(runId);
-        var scopes = new List<string> { "" };
-        if (Directory.Exists(runRoot))
+        if (!Directory.Exists(runRoot)) return results;
+        CheckLinks(runRoot);
+        var files = Directory.EnumerateFiles(runRoot, "evidence.json", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, MaxRecursionDepth = 5 }).Take(501).ToArray();
+        if (files.Length > 500) throw new ConflictException("Validation evidence exceeds the display limit; inspect artifacts.");
+        foreach (var candidate in files.OrderBy(File.GetLastWriteTimeUtc).ThenBy(p => p.Contains("Attempt-", StringComparison.Ordinal) ? 1 : 0))
         {
-            CheckLinks(runRoot);
-            scopes.AddRange(Directory.EnumerateDirectories(runRoot, "Step-*").Select(Path.GetFileName).OfType<string>()
-                .Where(name => Guid.TryParseExact(name[5..], "N", out _)).OrderBy(name => name));
-        }
-        foreach (var scope in scopes)
-        foreach (var phase in Enum.GetValues<TddPhase>())
-        {
-            var relative = (scope.Length == 0 ? "" : scope + "/") + $"{phase}/evidence.json";
+            var relative = Path.GetRelativePath(runRoot, candidate).Replace('\\', '/');
+            var parts = relative.Split('/');
+            if (parts.Length is < 2 or > 4 || !Enum.TryParse<TddPhase>(parts[^2], out var phase) || !Enum.IsDefined(phase)) continue;
+            var prefix = parts[..^2]; var index = 0; Guid? stepId = null; var attempt = 0; var origin = "Worker";
+            if (prefix.Length > 0 && prefix[0].StartsWith("Step-", StringComparison.Ordinal) && Guid.TryParseExact(prefix[0][5..], "N", out var step)) { stepId = step; index++; }
+            if (index < prefix.Length) {
+                var label = prefix[index];
+                if (label.StartsWith("Attempt-", StringComparison.Ordinal) && int.TryParse(label[8..], out attempt) && attempt > 0) { origin = attempt >= 10 ? "PlannerCorrection" : "Repair"; if (attempt >= 10) attempt -= 9; index++; }
+                else if (index == 0 && prefix.Length == 1 && label.StartsWith("Structured-", StringComparison.Ordinal) &&
+                    (int.TryParse(label[11..], out _) || Guid.TryParseExact(label[11..], "N", out _))) { origin = "StructuredTool"; index++; }
+                else if (index == 0 && prefix.Length == 1 && label == "SettingsProbe") { origin = "SettingsProbe"; index++; }
+            }
+            if (index != prefix.Length) continue;
             string path;
             try { path = Resolve(runId, relative); }
             catch (MissingEntityException) { continue; }
@@ -57,9 +65,9 @@ public sealed class RunArtifactReader(string root) : IRunArtifactReader
                 var failed = json.GetProperty("Failed").GetInt32();
                 if (total < 0 || failed < 0 || failed > total) throw new ConflictException("Invalid validation counters.");
                 results.Add(new(phase, json.GetProperty("ExitCode").GetInt32(), total, failed, relative,
-                    scope.Length == 0 ? null : Guid.ParseExact(scope[5..], "N"),
+                    stepId,
                     json.TryGetProperty("Kind", out var kind) ? kind.GetString() ?? "DotnetTest" : "DotnetTest",
-                    json.TryGetProperty("Error", out var error) ? error.GetString() : null));
+                    json.TryGetProperty("Error", out var error) ? error.GetString() : null, attempt, origin));
             }
             catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
             { throw new ConflictException("Validation evidence is incomplete or malformed; retry after the phase finishes."); }

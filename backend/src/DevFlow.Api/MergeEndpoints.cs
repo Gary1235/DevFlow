@@ -1,11 +1,22 @@
 using DevFlow.Contracts;
 using DevFlow.Core;
+using DevFlow.Infrastructure;
 namespace DevFlow.Api;
+public sealed record IntegrateTaskRequest(int ExpectedVersion, Guid RunId, string ResultCommit, string ExpectedTargetCommit);
 
 public static class MergeEndpoints
 {
     public static void MapMergeEndpoints(this WebApplication app)
     {
+        app.MapPost("/api/tasks/{id:guid}/integrate", async (Guid id, IntegrateTaskRequest input, HttpContext context, SqliteTaskStore store, IGitMergeService git, CancellationToken ct) => {
+            AiEndpoints.ExplicitAction(context);
+            var task = await store.GetTaskAsync(id, ct) ?? throw new MissingEntityException("Task not found.");
+            var project = await store.GetProjectAsync(task.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
+            var state = await git.InspectAsync(project, ct);
+            if (state.Branch != project.BaseBranch || state.HeadCommit != input.ExpectedTargetCommit) throw new ConflictException("目標分支或 HEAD 已變更，請重新讀取。");
+            var created = await store.CreateIntegrationTaskAsync(id, input.ExpectedVersion, input.RunId, input.ResultCommit, input.ExpectedTargetCommit, ct);
+            return Results.Created("/api/tasks/" + created.Id, created);
+        });
         app.MapGet("/api/projects/{id:guid}/git-state", async (Guid id, ITaskStore store, IGitMergeService git, CancellationToken ct) =>
         {
             var project = await store.GetProjectAsync(id, ct) ?? throw new MissingEntityException("Project not found.");

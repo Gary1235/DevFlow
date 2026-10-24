@@ -10,7 +10,7 @@ export interface ToolPermission {
   endReason?:string|null;
   state: 'Pending' | 'Allowed' | 'AllowedByRule' | 'AllowedByPolicy' | 'Denied' | 'Expired';
   ruleOptions?: RuleOption[]; approvalScope?: string;provider?:string;rulesAvailable?:boolean;
-  policyVersion?:number; risk?: {category:string;label:string;reason:string;batchAllowed:boolean;autoAllowed?:boolean;fixedBoundary?:boolean};
+  policyVersion?:number; risk?: {category:string;label:string;reason:string;reasonCode?:string;batchAllowed:boolean;autoAllowed?:boolean;fixedBoundary?:boolean};
 }
 interface RuleOption { kind: string; pattern: string; label: string }
 const states: Record<string, string> = {
@@ -36,7 +36,7 @@ function PermissionCard({ request, state, busy, task, discussion, now, onReply }
   </section>;
   return <section className={'tool-permission risk-'+category} aria-label="工具權限確認">
     <div className="tool-permission-heading"><strong>需要你的確認</strong><span role="status">{states[state]}</span></div>
-    <p>{badge}</p><p>{risk.reason}</p>
+    <p>{badge}</p><p>{risk.reason}</p>{'reasonCode' in risk&&risk.reasonCode&&<p>原因代碼：{risk.reasonCode} · DevFlow 工具政策{request.policyVersion!=null?' v'+request.policyVersion:''}</p>}
     {!risk.batchAllowed&&<p><strong>敏感或未知操作只能允許這一次，不會被批次允許規則放行。</strong></p>}
     {now >= (request.reminderAt?Date.parse(request.reminderAt):Date.parse(request.createdAt)+120000)
       ? <p className="info-banner" role="status">提醒：已等待超過 2 分鐘，仍需你的確認。DevFlow 不會因等待時間自動拒絕或核准；若 CLI 中斷，會回報並讓此確認失效。</p>

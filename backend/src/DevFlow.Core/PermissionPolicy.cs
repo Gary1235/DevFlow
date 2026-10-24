@@ -23,6 +23,8 @@ public sealed record PermissionPolicySettings(int Version = 0, bool AutomationEn
 
 public static partial class PermissionPolicy
 {
+    public static PermissionAssessment WorkspaceTarget(string path, string workspace, bool writing = false, string[][]? scopes = null) =>
+        Target(PermissionPolicySettings.Defaults, path, workspace, writing, scopes);
     internal static PermissionAssessment Ask(string category, string label, string reason, bool boundary = false) => new(category, label, reason, FixedBoundary: boundary);
     internal static PermissionAssessment Allow(string category, string label) => new(category, "自動允許：" + label,
         "操作限本次工作副本且符合固定邊界；副本內檔案視為已授權存取，不依敏感名稱攔截。保留原 CLI 政策與稽核紀錄。", AutoAllowed: true);
@@ -54,6 +56,7 @@ public static partial class PermissionPolicy
             if (args.ValueKind != JsonValueKind.Object || args.EnumerateObject().Select(p => p.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != args.EnumerateObject().Count()) return Unknown();
             if (args.TryGetProperty("AdditionalPermissions", out _) || args.TryGetProperty("NetworkApprovalContext", out _))
                 return Ask("Boundary", "需確認：額外權限／網路擴張", "原生 CLI 要求擴張權限，不能由自動化政策代為開放。", true);
+            if (tool == "run_validation") return SavedValidation(settings, args, workspace, project, readOnly);
             if (tool == "run_command") {
                 var commandRisk = CommandPermissionRisk.AssessPolicy(settings, args, workspace, readOnly, editScopes);
                 return project is null ? commandRisk : TrustedValidation(commandRisk, args, workspace, project, readOnly);
@@ -179,7 +182,7 @@ public static partial class PermissionPolicy
         if (!Directory.Exists(full)) return rootRisk;
         var pending = new Stack<string>(); pending.Push(full); var count = 0;
         while (pending.TryPop(out var directory)) foreach (var entry in Directory.EnumerateFileSystemEntries(directory)) {
-            if (++count > 20000) return Ask("Boundary", "需確認：搜尋範圍過大", "無法完整檢查搜尋目標，請縮小目錄或單次確認。", true);
+            if (++count > 20000) return Ask("Boundary", "需確認：搜尋範圍過大", $"已檢查超過 20,000 個項目，目前目錄：{directory}。請直接指定 src、tests 等較小搜尋根，或單次確認；不因工具的 ignore 設定就略過邊界檢查。", true) with { DiagnosticCode = "SearchLimit" };
             var attributes = File.GetAttributes(entry);
             if (rejectWildcardNames && entry.IndexOfAny(['*','?','[',']']) >= 0)
                 return WorkspaceFileOperations.Unresolved("FullName 清單包含會被 -Path 展開的字元，請改用 -LiteralPath。");

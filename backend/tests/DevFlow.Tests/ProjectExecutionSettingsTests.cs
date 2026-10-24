@@ -52,6 +52,50 @@ public sealed class ProjectExecutionSettingsTests : IAsyncLifetime
         Assert.Equal(Path.Combine(root, "backend"), process.Calls[0].Directory);
         Assert.Contains("CHR.sln", process.Calls[0].Arguments); Assert.Contains("trx", process.Calls[0].Arguments);
     }
+    [Fact] public async Task Npm_preparation_is_reused_only_until_the_lockfile_changes()
+    {
+        var working = Path.Combine(root, "frontend");
+        await File.WriteAllTextAsync(Path.Combine(working, "package.json"), "{}");
+        var lockfile = Path.Combine(working, "package-lock.json"); await File.WriteAllTextAsync(lockfile, "first");
+        var capture = new PreparationCapture();
+        var profile = new ValidationProfile("web", "Build", "frontend", "npm", ["run", "build"], PrepareArguments: ["ci"]);
+        var runner = new DotnetValidationRunner(capture, root); var runId = Guid.NewGuid();
+        await runner.ValidateAsync(Project(profile), new(root, "base"), runId, TddPhase.Baseline, default);
+        await runner.ValidateAsync(Project(profile), new(root, "base"), runId, TddPhase.Implementation, default);
+        Assert.Equal(1, capture.Installations);
+        await File.WriteAllTextAsync(lockfile, "second");
+        await runner.ValidateAsync(Project(profile), new(root, "base"), runId, TddPhase.Refactor, default);
+        Assert.Equal(2, capture.Installations);
+    }
+    private sealed class PreparationCapture : IProcessRunner
+    {
+        public int Installations;
+        public Task<ProcessResult> RunAsync(string e, IReadOnlyList<string> a, string w, string? input, CancellationToken ct) {
+            if (a.Last() == "ci") { Installations++; Directory.CreateDirectory(Path.Combine(w, "node_modules")); }
+            return Task.FromResult(new ProcessResult(0, "ok", ""));
+        }
+    }
+    [Fact] public async Task Repair_attempt_does_not_overwrite_initial_validation_artifacts()
+    {
+        var project = Project(new ValidationProfile("web", "Build", ".", "node", ["build.js"]));
+        var runId = Guid.NewGuid(); var runner = new DotnetValidationRunner(new Capture(1, "first failure"), root);
+        await runner.ValidateAsync(project, new(root, "base"), runId, TddPhase.Implementation, default);
+        await runner.ForAttempt(1).ValidateAsync(project, new(root, "base"), runId, TddPhase.Implementation, default);
+        Assert.True(File.Exists(Path.Combine(root, runId.ToString("N"), "Implementation", "evidence.json")));
+        Assert.True(File.Exists(Path.Combine(root, runId.ToString("N"), "Attempt-1", "Implementation", "evidence.json")));
+    }
+    [Fact] public async Task Timeout_preserves_partial_process_diagnostics()
+    {
+        var project = Project(new ValidationProfile("web", "Build", ".", "node", ["build.js"]));
+        var runId = Guid.NewGuid();
+        var evidence = await new DotnetValidationRunner(new InterruptedProcess(), root).ValidateAsync(project, new(root, "base"), runId, TddPhase.Implementation, default);
+        Assert.Equal("Timeout", evidence.FailureKind);
+        Assert.Contains("error before timeout", await File.ReadAllTextAsync(Path.Combine(root, runId.ToString("N"), "Implementation", "stdout.log")));
+    }
+    private sealed class InterruptedProcess : IProcessRunner {
+        public Task<ProcessResult> RunAsync(string e, IReadOnlyList<string> a, string w, string? input, CancellationToken ct) =>
+            throw new ProcessInterruptedException("error before timeout", "partial stderr", ct);
+    }
     [Theory] [InlineData("../outside")] [InlineData("C:/outside")] [InlineData("/outside")]
     public void Working_directories_cannot_escape_the_task(string directory) => Assert.Throws<ArgumentException>(() => ProjectExecutionSettings.Normalize(new[] {new ValidationProfile("web", "Web", directory, "node", ["build.js"])}));
     [Fact] public async Task Invalid_default_or_stale_project_version_cannot_partially_save_settings()

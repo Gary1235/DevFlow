@@ -31,6 +31,11 @@ public interface ITaskToolApprovalStore
 {
     Task AddToolApprovalAsync(TaskToolApproval request, CancellationToken ct = default);
     Task<IReadOnlyList<TaskToolApproval>> ListToolApprovalsAsync(Guid taskId, CancellationToken ct = default);
+    async Task<TaskToolApproval?> GetToolApprovalAsync(Guid taskId, Guid requestId, CancellationToken ct = default) =>
+        (await ListToolApprovalsAsync(taskId, ct)).SingleOrDefault(r => r.Id == requestId);
     Task ReplyToolApprovalAsync(Guid taskId, Guid requestId, Guid operationId, bool allow, CancellationToken ct = default);
     Task ExpireToolApprovalAsync(Guid taskId, Guid requestId, CancellationToken ct = default, string? reason = null);
 }
+
+public sealed record PendingPermission(Guid Id, Guid OwnerId, string Kind, string Title, string Tool, string Provider,
+    DateTimeOffset CreatedAt, DateTimeOffset ReminderAt, string ReasonCode, string Reason);

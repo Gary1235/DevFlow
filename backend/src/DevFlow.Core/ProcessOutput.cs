@@ -24,3 +24,10 @@ public static class ProcessOutput
 
 // Metadata only: command arguments, tool output and model reasoning are not included.
 public sealed record ProcessActivity(Guid Id, string Executable, string Kind, int Characters = 0, int? ExitCode = null, string? Summary = null);
+
+public sealed class ProcessInterruptedException(string output, string error, CancellationToken token)
+    : OperationCanceledException("Process interrupted.", token)
+{
+    public string StandardOutput { get; } = output;
+    public string StandardError { get; } = error;
+}

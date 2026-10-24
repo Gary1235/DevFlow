@@ -31,11 +31,12 @@ public sealed partial class ProcessRunner : IProcessRunner, IInteractiveProcessR
             await process.WaitForExitAsync(ct);
             return new(process.ExitCode, await output, await error);
         }
-        catch
+        catch (Exception ex)
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
             await Task.WhenAll(output, error).WaitAsync(TimeSpan.FromSeconds(5));
+            if (ex is OperationCanceledException) throw new ProcessInterruptedException(await output, await error, ct);
             throw;
         }
         finally { semantic?.Finish(); activity?.Invoke(new(processId, executable, "Finished", ExitCode: process.HasExited ? process.ExitCode : null)); }

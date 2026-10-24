@@ -40,7 +40,8 @@ builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
 builder.Services.AddSingleton<IWorkspaceManager>(sp => new GitWorkspaceManager(sp.GetRequiredService<IProcessRunner>(), worktrees));
 builder.Services.AddSingleton(registry);
 builder.Services.AddSingleton(new CliMaintenanceGate(paths.CliControl));
-builder.Services.AddSingleton(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), registry, artifacts, store, typeof(TaskWorker).Assembly.Location, store));
+builder.Services.AddSingleton(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), registry, artifacts, store, typeof(TaskWorker).Assembly.Location, store,
+    builder.Configuration.GetValue("DevFlow:StructuredToolsEnabled", true) ? new StructuredToolFactory(store, sp.GetRequiredService<IProcessRunner>(), artifacts) : null));
 builder.Services.AddSingleton<IAgentRunner>(sp => sp.GetRequiredService<RoutedCliRunner>());
 builder.Services.AddSingleton<IValidationRunner>(sp => new DotnetValidationRunner(sp.GetRequiredService<IProcessRunner>(), artifacts));
 builder.Services.AddSingleton<ExecutionCoordinator>();
@@ -48,16 +49,22 @@ builder.Services.AddSingleton<IPlanningRunner>(sp => sp.GetRequiredService<Route
 builder.Services.AddSingleton<IResultDiffReader, GitResultDiffReader>();
 builder.Services.AddSingleton<IExecutionPolicyGuard, GitExecutionPolicyGuard>();
 builder.Services.AddSingleton<PlanningCoordinator>();
-builder.Services.AddSingleton(new WorkerSettings(timeoutSeconds));
+var concurrency = builder.Configuration.GetValue("DevFlow:MaxConcurrentTasks", 2);
+if (concurrency is < 1 or > 4) throw new ArgumentException("MaxConcurrentTasks must be between 1 and 4.");
+builder.Services.AddSingleton(new WorkerSettings(timeoutSeconds, concurrency));
 builder.Services.AddHostedService<TaskWorker>();
 await builder.Build().RunAsync();
 
-internal sealed record WorkerSettings(int TimeoutSeconds);
+internal sealed record WorkerSettings(int TimeoutSeconds, int Concurrency);
 internal sealed class TaskWorker(ExecutionCoordinator coordinator, PlanningCoordinator planning, WorkerSettings settings, CliMaintenanceGate gate, CliRegistry registry, WorkerState state, ILogger<TaskWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("DevFlow Worker started.");
+        logger.LogInformation("DevFlow Worker started with {Concurrency} slots.", settings.Concurrency);
+        await Task.WhenAll(Enumerable.Range(0, settings.Concurrency).Select(slot => Task.Run(() => RunSlotAsync(slot, stoppingToken), stoppingToken)));
+    }
+    private async Task RunSlotAsync(int slot, CancellationToken stoppingToken)
+    {
         bool preferPlanning = true;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -68,7 +75,7 @@ internal sealed class TaskWorker(ExecutionCoordinator coordinator, PlanningCoord
                 bool worked;
                 using (gate.EnterExecution())
                 {
-                    state.State = "Working";
+                    state.Slots[slot] = "Working";
                     registry.Refresh();
                     worked = preferPlanning
                         ? await planning.ExecuteNextAsync(timeout.Token) || await coordinator.ExecuteNextAsync(timeout.Token)
@@ -77,16 +84,16 @@ internal sealed class TaskWorker(ExecutionCoordinator coordinator, PlanningCoord
                 preferPlanning = !preferPlanning;
                 if (!worked)
                 {
-                    state.State = "Idle";
+                    state.Slots[slot] = "Idle";
                     await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (ConflictException) { state.State = "Waiting"; await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); }
+            catch (ConflictException) { state.Slots[slot] = "Waiting"; await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken); }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Worker iteration failed.");
-                state.State = "Error";
+                state.Slots[slot] = "Error";
                 await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
             }
         }
@@ -96,7 +103,8 @@ internal sealed class TaskWorker(ExecutionCoordinator coordinator, PlanningCoord
 internal sealed class WorkerState
 {
     public Guid InstanceId { get; } = Guid.NewGuid();
-    public volatile string State = "Idle";
+    public System.Collections.Concurrent.ConcurrentDictionary<int, string> Slots { get; } = new();
+    public string State => Slots.Values.Contains("Working") ? "Working" : Slots.Values.Contains("Error") ? "Error" : Slots.Values.Contains("Waiting") ? "Waiting" : "Idle";
 }
 internal sealed class WorkerHeartbeat(SqliteTaskStore store, WorkerState state, ILogger<WorkerHeartbeat> logger) : BackgroundService
 {
@@ -107,7 +115,10 @@ internal sealed class WorkerHeartbeat(SqliteTaskStore store, WorkerState state, 
         {
             do
             {
-                try { await store.RecordWorkerPulseAsync(new(state.InstanceId, Environment.ProcessId, state.State, DateTimeOffset.UtcNow), stoppingToken); }
+                try {
+                    var pending = await store.ListPendingPermissionsAsync(stoppingToken);
+                    await store.RecordWorkerPulseAsync(new(state.InstanceId, Environment.ProcessId, pending.Count > 0 ? "WaitingPermission" : state.State, DateTimeOffset.UtcNow), stoppingToken);
+                }
                 catch (Exception ex) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(ex, "Cannot report Worker presence."); }
             } while (await timer.WaitForNextTickAsync(stoppingToken));
         }

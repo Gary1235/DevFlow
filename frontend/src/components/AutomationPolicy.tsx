@@ -34,6 +34,7 @@ export function AutomationPolicy(){
       <div className="automation-policy-fields">{fields.map(field=><label key={field.key}>{field.label}<textarea rows={3} value={draft[field.key].join('\n')} onChange={e=>setDraft({...draft,[field.key]:e.target.value.split('\n')})}/><span className="footnote">{field.hint}</span></label>)}</div>
       <p className="footnote">這是 DevFlow 收到工具請求時的政策，不是作業系統沙箱。CLI 內部直接執行的操作、程式碼內隱藏的秘密及腳本的間接存取，無法保證由這裡攔截。保留 CLI 原生限制，不使用全域跳過確認。AI 修改政策需人工核准。</p>
       <p className="footnote">保存只影響之後的請求；已開始的操作不會撤回，現有待確認項目仍需回覆。政策版本 v{draft.version}。</p>
+      <p className="footnote">啟用自動化政策時，由此政策判斷新請求，舊的一般讀取允許規則不參與比對。建置與測試請使用專案儲存的完整驗證指令，套件安裝與未知腳本仍需單次確認。</p>
       <div className="button-row"><button className="primary" disabled={busy}>保存自動化政策</button><button type="button" className="secondary" disabled={busy} onClick={()=>{setError('');resource.refresh();}}>重新讀取政策（捨棄編輯）</button></div>
     </form>}
   </section>;

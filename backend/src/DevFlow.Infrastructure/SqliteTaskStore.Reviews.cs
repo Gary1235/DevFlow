@@ -40,7 +40,7 @@ public sealed partial class SqliteTaskStore
         var updated = task.Retry(instructions);
         if (preview.BaseCommit is not null) updated = updated with { RevisionCommit = preview.BaseCommit };
         if (scope == "Restart")
-            updated = updated with { StepResults = [], ActiveStepId = null, RevisionCommit = preview.BaseCommit, AutoReviewAttempt = 0 };
+            updated = updated with { StepResults = [], ActiveStepId = null, RevisionCommit = preview.BaseCommit, AutoReviewAttempt = 0, ResumeCommit = null, Recovery = null };
         else if (task.Workflow?.Steps is { } steps && (task.StepResults?.Length ?? 0) == steps.Length)
             updated = updated with { StepResults = [], ActiveStepId = null };
         UpdateTask(c, tx, updated, expectedVersion);

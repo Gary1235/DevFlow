@@ -10,6 +10,10 @@ public static class ToolPermissionEndpoints
 {
     public static void MapToolPermissionEndpoints(this WebApplication app)
     {
+        app.MapGet("/api/permissions/pending", async (SqliteTaskStore store, DiscussionOperations discussions, CancellationToken ct) =>
+            (await store.ListPendingPermissionsAsync(ct)).Concat(discussions.PendingPermissions()).OrderBy(p => p.CreatedAt));
+        app.MapGet("/api/tasks/{id:guid}/permissions/history", (Guid id, Guid runId, long? before, int? limit, SqliteTaskStore store, CancellationToken ct) =>
+            store.PermissionHistoryAsync(id, runId, before, limit ?? 100, ct));
         app.MapGet("/api/tool-permission-policy", (SqliteTaskStore store, CancellationToken ct) => store.GetPermissionPolicyAsync(ct));
         app.MapPut("/api/tool-permission-policy", (PermissionPolicyInput input, HttpContext context, SqliteTaskStore store, CancellationToken ct) => {
             AiEndpoints.ExplicitAction(context);

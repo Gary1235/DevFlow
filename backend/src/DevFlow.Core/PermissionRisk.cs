@@ -7,6 +7,13 @@ public sealed record PermissionAssessment(string Category, string Label, string 
     bool AutoAllowed = false, bool FixedBoundary = false)
 {
     public int DeletedFileCount { get; init; }
+    public string? DiagnosticCode { get; init; }
+    public string ReasonCode => DiagnosticCode ?? (AutoAllowed ? "AllowedByPolicy" : Label.Contains("無法確認操作邊界", StringComparison.Ordinal) ? "UnresolvedOperation" : Category switch {
+        "OperationBoundary" => "UnresolvedOperation", "Boundary" => "BoundaryConfirmation",
+        "Execution" => "UnapprovedExecution", "Network" => "NetworkConfirmation",
+        "Write" => "WriteConfirmation", "Deletion" => "DeletionConfirmation",
+        "SensitiveCommand" => "SensitiveCommand", _ => "UnclassifiedOperation"
+    });
 }
 
 // This class classifies approval requests, never the model's description of its intent.

@@ -22,6 +22,10 @@ public sealed record ToolApprovalReply(Guid OperationId, bool Allow, ToolPermiss
 
 public sealed partial class DiscussionOperations
 {
+    public PendingPermission[] PendingPermissions() => running.ToArray().SelectMany(pair => pair.Value.Permissions
+        .Where(p => p.State == "Pending").Select(p => new PendingPermission(p.Id, pair.Key, "discussion", "需求討論", p.Tool,
+            p.Provider, p.CreatedAt, p.ReminderAt, p.Risk.ReasonCode, p.Risk.Reason))).ToArray();
+
     public void ReplyPermission(Guid discussionId, Guid requestId, ToolApprovalReply reply)
     {
         if (!running.TryGetValue(discussionId, out var operation) || operation.Id != reply.OperationId)
@@ -56,7 +60,7 @@ public sealed partial class DiscussionOperations
             lock (sync)
             {
                 if (disposed || Stopped || Token.IsCancellationRequested) return false;
-                if (!risk.AutoAllowed && matched is null && permissions.Values.Count(p => p.Request.State is not ("AllowedByRule" or "AllowedByPolicy")) >= 50) throw new ConflictException("本次工具確認次數已達上限，請停止後重新提問。");
+                if (!risk.AutoAllowed && matched is null && permissions.Values.Count(p => p.Request.State == "Pending") >= 50) throw new ConflictException("同時等待的工具確認已達上限；請先處理待確認項目。");
                 permissions.Add(request.Id, pending);
             }
             if (risk.AutoAllowed || matched is not null) return true;

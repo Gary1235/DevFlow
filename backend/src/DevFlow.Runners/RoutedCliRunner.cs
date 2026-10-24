@@ -2,7 +2,8 @@ using DevFlow.Core;
 namespace DevFlow.Runners;
 
 public sealed class RoutedCliRunner(IProcessRunner process, CliRegistry registry, string artifactsRoot,
-    ITaskToolApprovalStore? approvals = null, string? permissionHelper = null, ICliVerificationStore? verifications = null) : IAgentRunner, IPlanningRunner
+    ITaskToolApprovalStore? approvals = null, string? permissionHelper = null, ICliVerificationStore? verifications = null,
+    IStructuredToolFactory? structuredTools = null) : IAgentRunner, IPlanningRunner
 {
     private async Task<T> Invoke<T>(WorkTask task, Workspace workspace, Guid runId, bool planning, Func<IProcessRunner, CliCommand, string, Task<T>> action, CancellationToken ct)
     {
@@ -28,7 +29,8 @@ public sealed class RoutedCliRunner(IProcessRunner process, CliRegistry registry
                 Path.Combine(artifactsRoot, runId.ToString("N"), "permission-decisions.jsonl"), ct, permissionHelper);
             result = await Call(prefixed);
         }
-        else result = await Call(new PermissionProcess(prefixed, provider, operation));
+        else result = await Call(new PermissionProcess(prefixed, provider, operation,
+            provider == "codex" ? structuredTools?.Create(task, workspace, runId, operation) : null));
         } catch (Exception ex) when (operation.Failure is not null && !ct.IsCancellationRequested) {
             throw new InvalidOperationException(operation.Failure, ex);
         }

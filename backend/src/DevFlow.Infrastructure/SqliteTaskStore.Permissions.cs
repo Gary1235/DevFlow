@@ -7,6 +7,38 @@ namespace DevFlow.Infrastructure;
 
 public sealed partial class SqliteTaskStore
 {
+    public Task<TaskToolApproval?> GetToolApprovalAsync(Guid taskId, Guid requestId, CancellationToken ct = default)
+    {
+        using var c = Open(ct); using var tx = c.BeginTransaction();
+        var request = ReadOne<TaskToolApproval>(c, tx, "ToolApprovals", requestId);
+        if (request?.TaskId != taskId) return Task.FromResult<TaskToolApproval?>(null);
+        if (request.State == "Pending" && !ApprovalRunActive(c, tx, taskId, request.OperationId)) {
+            request = request with { State = "Expired", EndReason = "執行已結束或取消；此確認不再有效。" };
+            SaveApproval(c, tx, request);
+        }
+        tx.Commit(); return Task.FromResult<TaskToolApproval?>(request);
+    }
+
+    public Task<IReadOnlyList<PendingPermission>> ListPendingPermissionsAsync(CancellationToken ct = default)
+    {
+        using var c = Open(ct);
+        using var cmd = Command(c, null, """
+            SELECT a.Payload,t.Payload FROM ToolApprovals a
+            JOIN Tasks t ON t.Id=a.TaskId JOIN Runs r ON r.Id=a.RunId
+            WHERE json_extract(a.Payload,'$.State')='Pending'
+            AND t.Status IN ($planning,$running) AND json_extract(r.Payload,'$.FinishedAt') IS NULL
+            ORDER BY a.rowid
+            """, ("$planning", (int)Status.Planning), ("$running", (int)Status.Running));
+        using var reader = cmd.ExecuteReader();
+        var pending = new List<PendingPermission>();
+        while (reader.Read()) {
+            var r = JsonSerializer.Deserialize<TaskToolApproval>(reader.GetString(0))!;
+            var task = JsonSerializer.Deserialize<WorkTask>(reader.GetString(1))!;
+            pending.Add(new(r.Id, task.Id, "task", task.Title, r.Tool, r.Provider, r.CreatedAt, r.ReminderAt, r.Risk.ReasonCode, r.Risk.Reason));
+        }
+        return Task.FromResult<IReadOnlyList<PendingPermission>>(pending);
+    }
+
     private static bool ApprovalRunActive(SqliteConnection c, SqliteTransaction tx, Guid taskId, Guid runId)
     {
         var task = ReadOne<WorkTask>(c, tx, "Tasks", taskId);
@@ -36,8 +68,8 @@ public sealed partial class SqliteTaskStore
         else if (rule is not null) request = request with { State = "AllowedByRule", MatchedRuleId = rule.Id, ApprovalScope = rule.TaskId is null ? "Project" : "Task" };
         else
         {
-            using var count = Command(c, tx, "SELECT COUNT(*) FROM ToolApprovals WHERE RunId=$run AND json_extract(Payload,'$.State') NOT IN ('AllowedByRule','AllowedByPolicy')", ("$run", request.OperationId.ToString()));
-            if (Convert.ToInt64(count.ExecuteScalar()) >= 50) throw new ConflictException("本次工具確認次數已達上限。");
+            using var count = Command(c, tx, "SELECT COUNT(*) FROM ToolApprovals WHERE RunId=$run AND json_extract(Payload,'$.State')='Pending'", ("$run", request.OperationId.ToString()));
+            if (Convert.ToInt64(count.ExecuteScalar()) >= 50) throw new ConflictException("同時等待的工具確認已達上限；請先處理待確認項目。");
         }
         Execute(c, tx, "INSERT INTO ToolApprovals VALUES($id,$task,$run,$payload)", ("$id", request.Id.ToString()),
             ("$task", request.TaskId.ToString()), ("$run", request.OperationId.ToString()), ("$payload", JsonSerializer.Serialize(request)));

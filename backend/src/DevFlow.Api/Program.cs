@@ -5,6 +5,11 @@ using DevFlow.Infrastructure;
 using DevFlow.Api;
 using DevFlow.Runners;
 
+if (args is ["--devflow-mcp", var mcpPipe])
+{
+    await StructuredMcpBridge.RunClientAsync(mcpPipe);
+    return;
+}
 if (args is ["--agy-permission-hook", var pipeName])
 {
     await AntigravityPermissionHook.RunClientAsync(pipeName);
@@ -54,6 +59,9 @@ builder.Services.AddSingleton(sp => new CliMaintenance(sp.GetRequiredService<IPr
             (await store.ListDiscussionsAsync(ct)).Any(d => d.ActiveOperation is not null);
     }, cliControl, builder.Configuration["DevFlow:NodeExecutable"], builder.Configuration["DevFlow:NpmCliPath"], builder.Configuration["DevFlow:NpmGlobalRoot"]));
 var collaborationArtifacts = Path.GetFullPath(builder.Configuration["DevFlow:ArtifactsRoot"] ?? Path.Combine(Environment.CurrentDirectory, ".data", "artifacts"));
+builder.Services.AddSingleton(new DiscussionImageStore(collaborationArtifacts));
+builder.Services.AddSingleton(sp=>new CliQuotaReader(sp.GetRequiredService<IProcessRunner>(),sp.GetRequiredService<CliRegistry>(),cliControl));
+builder.Services.AddSingleton<IAgentCatalog,AgentCatalog>();
 builder.Services.AddSingleton<IPlanningRunner>(sp => new RoutedCliRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<CliRegistry>(), collaborationArtifacts,
     permissionHelper: typeof(AntigravityPermissionHook).Assembly.Location, verifications: sp.GetRequiredService<SqliteTaskStore>(),
     structuredTools: builder.Configuration.GetValue("DevFlow:StructuredToolsEnabled", true) ? new StructuredToolFactory(sp.GetRequiredService<SqliteTaskStore>(), sp.GetRequiredService<IProcessRunner>(), collaborationArtifacts) : null));

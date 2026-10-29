@@ -7,6 +7,7 @@ import {LiveActivity} from './LiveActivity';
 import {ToolPermissions, type ToolPermission} from './ToolPermissions';
 import type {Discussion, DiscussionMessage, Plan, Provider, RuntimeSnapshot, Selection, WorkTask} from '../types';
 import './plan-discussion.css';
+import { ImageThumbnailStrip, ImageUploadButton, MessageImages, useImageAttachments } from './ImageAttachments';
 
 interface Progress {operationId:string|null;content:string;activity:RuntimeSnapshot|null;permissions:ToolPermission[]}
 
@@ -16,6 +17,7 @@ export function PlanDiscussion({task, plan, dirty, onApplied, onClose}: {
   const [accepted, setAccepted] = useState<Discussion|null>(null);
   const [error, setError] = useState('');
   const [text, setText] = useState('');
+  const attachments=useImageAttachments();
   const [selection, setSelection] = useState<Selection|null>(null);
   const [choosing, setChoosing] = useState(false);
   const tail = useRef<HTMLDivElement>(null);
@@ -51,8 +53,9 @@ export function PlanDiscussion({task, plan, dirty, onApplied, onClose}: {
       const updated = await api<Discussion>(base+(proposal?'/plan-proposal':'/messages')+'?background=1', 'POST', {
         expectedVersion:d.version, message:text.trim() || undefined,
         selection:selection ?? d.selection, planRevision:revision,
+        ...(!proposal&&attachments.images.length?{images:attachments.images}:{}),
       });
-      setAccepted(updated); setText(''); resource.refresh();
+      setAccepted(updated); setText('');if(!proposal)attachments.clear();resource.refresh();
     });
   }
 
@@ -79,6 +82,7 @@ export function PlanDiscussion({task, plan, dirty, onApplied, onClose}: {
           <div className="chat-message-meta"><strong>{message.role==='user'?'你':selectionText(message.selection || d.selection)}</strong>
             {message.planContext && <span>{message.planContext.revision ? `依據版本 ${message.planContext.revision}` : '依據任務需求'}</span>}</div>
           <ProseContent content={message.content}/>
+          <MessageImages discussionId={d!.id} images={message.images}/>
           {message.proposedPlan && <div className="plan-proposal">
             <details><summary>查看修訂前版本 {message.planContext?.revision}</summary><ProseContent content={message.planContext?.text || '尚無原始計畫'}/></details>
             <details><summary>預覽完整修訂計畫</summary><ProseContent content={message.proposedPlan}/></details>
@@ -97,20 +101,124 @@ export function PlanDiscussion({task, plan, dirty, onApplied, onClose}: {
       {d?.error && <div role="alert" className="error-banner">{d.error} 訊息已保留，可重新提問或產生草案。</div>}
       <div ref={tail}/>
     </div>
-    {d && <form className="plan-discussion-composer" onSubmit={e=>{e.preventDefault();if (!busy && text.trim()) void send(false);}}>
-      <button type="button" className="secondary" aria-expanded={choosing} onClick={()=>setChoosing(!choosing)}>{selectionText(selection ?? d.selection)} ▾</button>
-      {choosing && <div className="plan-discussion-models">
-        {providers.error && <p role="alert">{providers.error}</p>}
-        <AiChoice label="計畫討論" providers={providers.data || []} value={selection ?? d.selection} onChange={s=>setSelection(s)}/>
-        <button type="button" className="secondary" onClick={()=>setChoosing(false)}>完成</button>
-      </div>}
-      <textarea aria-label="計畫討論訊息" rows={3} maxLength={20000} value={text} onChange={e=>setText(e.target.value)} placeholder="針對這份計畫提問或補充修改需求…"/>
-      <div className="button-row">
-        {running?<button type="button" className="danger-button" disabled={action.busy} onClick={()=>void action.run(async()=>{await api(base+'/stop','POST',{operationId:d.activeOperation});resource.refresh();})}>停止回覆</button>
-          :<><button className="primary" disabled={busy || !text.trim()}>傳送</button>
-            <button type="button" className="secondary" disabled={busy || dirty} onClick={()=>void send(true)}>產生修訂草案</button></>}
-      </div>
-      <p className="footnote">可隨時切換模型；每次回覆會使用模型額度。附上所選版本、需求、驗收條件與對話紀錄。</p>
-    </form>}
+    {d && (
+      <form
+        className="plan-discussion-composer"
+        onPaste={event => {
+          if (!busy) attachments.paste(event);
+        }}
+        onDragOver={event => {
+          if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+        }}
+        onDrop={event => {
+          event.preventDefault();
+          if (!busy) attachments.drop(event);
+        }}
+        onSubmit={event => {
+          event.preventDefault();
+          if (
+            !busy &&
+            !attachments.reading &&
+            (text.trim() || attachments.images.length) &&
+            !(
+              (selection ?? d.selection).provider === 'antigravity' &&
+              (attachments.images.length || d.messages.some(messageItem => messageItem.images?.length))
+            )
+          ) {
+            void send(false);
+          }
+        }}
+      >
+        <ImageThumbnailStrip
+          draft={attachments}
+          busy={busy}
+          provider={(selection ?? d.selection).provider}
+          hasHistory={d.messages.some(messageItem => Boolean(messageItem.images?.length))}
+        />
+        <textarea
+          aria-label="計畫討論訊息"
+          rows={3}
+          maxLength={20000}
+          value={text}
+          onChange={event => setText(event.target.value)}
+          placeholder="針對這份計畫提問或補充修改需求…"
+        />
+        <div className="plan-discussion-toolbar">
+          <div className="plan-discussion-toolbar-left">
+            <ImageUploadButton draft={attachments} busy={busy} />
+            <button
+              type="button"
+              className="secondary chat-model-button"
+              aria-expanded={choosing}
+              onClick={() => setChoosing(!choosing)}
+            >
+              {selectionText(selection ?? d.selection)} ▾
+            </button>
+            {choosing && (
+              <div className="plan-discussion-models">
+                {providers.error && <p role="alert">{providers.error}</p>}
+                <AiChoice
+                  label="計畫討論"
+                  providers={providers.data || []}
+                  value={selection ?? d.selection}
+                  onChange={selectedOption => setSelection(selectedOption)}
+                />
+                <button type="button" className="secondary" onClick={() => setChoosing(false)}>
+                  完成
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="button-row">
+            {running ? (
+              <button
+                type="button"
+                className="danger-button"
+                disabled={action.busy}
+                onClick={() =>
+                  void action.run(async () => {
+                    await api(base + '/stop', 'POST', { operationId: d.activeOperation });
+                    resource.refresh();
+                  })
+                }
+              >
+                停止回覆
+              </button>
+            ) : (
+              <>
+                <button
+                  className="primary"
+                  disabled={
+                    busy ||
+                    attachments.reading ||
+                    (!text.trim() && !attachments.images.length) ||
+                    ((selection ?? d.selection).provider === 'antigravity' &&
+                      (attachments.images.length > 0 ||
+                        d.messages.some(messageItem => Boolean(messageItem.images?.length))))
+                  }
+                >
+                  傳送
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={
+                    busy ||
+                    dirty ||
+                    attachments.reading ||
+                    attachments.images.length > 0 ||
+                    ((selection ?? d.selection).provider === 'antigravity' &&
+                      d.messages.some(messageItem => Boolean(messageItem.images?.length)))
+                  }
+                  onClick={() => void send(true)}
+                >
+                  產生修訂草案
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </form>
+    )}
   </aside>;
 }

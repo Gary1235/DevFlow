@@ -20,6 +20,7 @@ public sealed class NativePermissionHook : IAsyncDisposable
     private readonly SemaphoreSlim auditLock = new(1, 1);
     private string? conversation;
     private readonly object conversationLock = new();
+    private StructuredMcpBridge? structuredMcp;
 
     private NativePermissionHook(IToolApprovalOperation operation, string workspace, string hookFile,
         byte[]? original, bool createdDirectory, string pipeName, string auditFile)
@@ -30,7 +31,7 @@ public sealed class NativePermissionHook : IAsyncDisposable
         server = ServeAsync();
     }
 
-    public static async Task<NativePermissionHook> CreateAsync(IToolApprovalOperation operation, string workspace, string auditFile, CancellationToken ct, string helperAssembly)
+    public static async Task<NativePermissionHook> CreateAsync(IToolApprovalOperation operation, string workspace, string auditFile, CancellationToken ct, string helperAssembly, StructuredMcpBridge? structuredMcp = null)
     {
         workspace = Path.GetFullPath(workspace);
         var directory = Path.Combine(workspace, ".agents"); var hookFile = Path.Combine(directory, "hooks.json");
@@ -70,7 +71,7 @@ public sealed class NativePermissionHook : IAsyncDisposable
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(auditFile))!);
             await File.WriteAllTextAsync(hookFile, hooks.ToJsonString(), new UTF8Encoding(false), ct);
-            return new(operation, workspace, hookFile, original, created, pipe, auditFile);
+            return new(operation, workspace, hookFile, original, created, pipe, auditFile) { structuredMcp = structuredMcp };
         }
         catch
         {
@@ -151,6 +152,8 @@ public sealed class NativePermissionHook : IAsyncDisposable
             if (conversation != conversationId) return ("deny", "不接受其他對話的工具請求。");
         }
         var call = payload.GetProperty("toolCall"); var tool = call.GetProperty("name").GetString()!; var args = call.GetProperty("args");
+        if (structuredMcp?.OwnsTool(tool, args) == true)
+            return ("auto_approve", "交由本次 DevFlow MCP 執行器檢查實際參數與任務權限；此轉接不授權其他 MCP 或原生工具。");
         if (operation.ReadOnly && tool is ("write_to_file" or "replace_file_content" or "multi_replace_file_content" or "notebook_edit" or "sed_file"))
             return ("deny", "目前是唯讀規劃或討論，不允許修改檔案。");
         if (tool is "ask_permission" or "ask_custom_permission")

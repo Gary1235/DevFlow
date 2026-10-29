@@ -32,7 +32,7 @@ it('starts from project and first question without a title or rule form',async()
   fireEvent.keyDown(message,{key:'Enter',isComposing:true});expect(calls.some(c=>c.method==='POST')).toBe(false);
   fireEvent.keyDown(message,{key:'Enter'});
   await waitFor(()=>expect(calls.some(c=>c.path.endsWith('/messages'))).toBe(true));
-  expect(calls.find(c=>c.path==='/api/discussions'&&c.method==='POST')?.body).toEqual({projectId,selection:{provider:'codex',model:null}});
+  expect(calls.find(c=>c.path==='/api/discussions'&&c.method==='POST')?.body).toEqual({projectId,selection:{provider:'codex',model:null},agentMode:true});
   expect(calls.find(c=>c.path.endsWith('/messages'))?.body.message).toBe('先討論訂單流程');
 });
 

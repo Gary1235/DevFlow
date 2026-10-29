@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { useResource } from './hooks';
 import { filterTasks, formatDate, groups, selectionText, statusNames } from './domain';
@@ -11,13 +11,17 @@ import { StoragePage } from './components/StoragePage';
 import { WorkerConnection } from './components/WorkerStatus';
 import { PermissionSettings } from './components/PermissionSettings';
 import { PendingPermissions } from './components/PendingPermissions';
+import { Discussions } from './components/Discussions';
+import {ConversationTask} from './components/ConversationTask';
+import {openTaskConversation} from './components/TaskDelivery';
+import {useAction} from './hooks';
 import { TitleActivity, taskTitleState } from './components/TitleActivity';
 import type { BaseData, Project, WorkTask } from './types';
 
 function useHash() {
-  const [hash, setHash] = useState(location.hash.slice(1) || 'overview');
+  const [hash, setHash] = useState(location.hash.slice(1) || 'discussions');
   useEffect(() => {
-    const handleHashChange = () => setHash(location.hash.slice(1) || 'overview');
+    const handleHashChange = () => setHash(location.hash.slice(1) || 'discussions');
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
@@ -33,11 +37,13 @@ function TaskTable({
   projects: Project[];
   onCreate: () => void;
 }) {
+  const [expanded,setExpanded]=useState<string|null>(null);
+  const notice=useNotice(),action=useAction(notice);
   if (!tasks.length) {
     return (
-      <Empty title="這裡還沒有任務" description="建立需求，選擇 AI，讓流程開始。">
+      <Empty title="這裡還沒有任務" description="先開新對話討論需求，確認計畫後再開始實作。">
         <button className="primary" onClick={onCreate}>
-          建立第一個任務
+          開始第一個對話
         </button>
       </Empty>
     );
@@ -59,9 +65,9 @@ function TaskTable({
               groups.review.includes(taskItem.status) || groups.failed.includes(taskItem.status);
             const matchedProject = projects.find(projectItem => projectItem.id === taskItem.projectId);
             return (
-              <tr key={taskItem.id} className={needsAction ? 'row-highlight' : ''}>
+              <Fragment key={taskItem.id}><tr className={needsAction ? 'row-highlight' : ''}>
                 <td>
-                  <a className="task-title" href={'#task/' + taskItem.id}>
+                  <a className="task-title" href={'#task/' + taskItem.id} onClick={event=>{event.preventDefault();setExpanded(expanded===taskItem.id?null:taskItem.id);}}>
                     {taskItem.title}
                     <TitleActivity state={taskTitleState(taskItem.status)} compact />
                   </a>
@@ -81,11 +87,10 @@ function TaskTable({
                 </td>
                 <td>{formatDate(taskItem.createdAt)}</td>
                 <td>
-                  <a className={needsAction ? 'action-pill' : 'text-link'} href={'#task/' + taskItem.id}>
-                    {needsAction ? '立即處理 →' : '查看 →'}
-                  </a>
+                  <div className="button-row"><button className="secondary" disabled={action.busy} onClick={()=>void action.run(()=>openTaskConversation(taskItem.id))}>回到對話</button>
+                  <button className={needsAction?'primary':'secondary'} aria-expanded={expanded===taskItem.id} onClick={()=>setExpanded(expanded===taskItem.id?null:taskItem.id)}>{['AwaitingReview','Approved'].includes(taskItem.status)?'驗收與預覽':'查看進度'}</button></div>
                 </td>
-              </tr>
+              </tr>{expanded===taskItem.id&&<tr><td colSpan={5}><ConversationTask taskId={taskItem.id} project={matchedProject} busy={action.busy} onResume={()=>void action.run(()=>openTaskConversation(taskItem.id))}/></td></tr>}</Fragment>
             );
           })}
         </tbody>
@@ -111,6 +116,18 @@ function Workbench() {
   const base = useResource('base', loadBase);
   const hash = useHash();
   const notice = useNotice();
+  const previousTaskStates=useRef(new Map<string,string>());
+  useEffect(()=>{
+    if(!base.data)return;
+    for(const task of base.data.tasks){
+      const previous=previousTaskStates.current.get(task.id);
+      if(task.workflow?.simpleMode&&previous&&previous!==task.status){
+        if(task.status==='AwaitingReview')notice(task.title+'：自動驗證已通過，請進行人工測試與成果審核。');
+        else if(task.status==='AwaitingStepApproval')notice(task.title+'：主管需要你確認，請查看任務問題。');
+      }
+      previousTaskStates.current.set(task.id,task.status);
+    }
+  },[base.data,notice]);
   const [project, setProject] = useState('');
   const [search, setSearch] = useState('');
   const [group, setGroup] = useState('');
@@ -121,9 +138,10 @@ function Workbench() {
   const data = base.data || { projects: [], tasks: [], providers: [] };
   const match = /^task\/([a-f0-9-]{36})$/i.exec(hash);
   const taskId = match?.[1].toLowerCase();
+  const discussionId=/^discussion\/([a-f0-9-]{36})$/i.exec(hash)?.[1].toLowerCase();
   const view = taskId
     ? 'detail'
-    : ['overview', 'tasks', 'projects', 'ai', 'rules', 'storage', 'permissions'].includes(hash)
+    : discussionId ? 'discussions' : ['discussions','overview', 'tasks', 'projects', 'ai', 'rules', 'storage', 'permissions'].includes(hash)
       ? hash
       : 'overview';
 
@@ -137,10 +155,11 @@ function Workbench() {
       location.hash = '#projects';
       return;
     }
-    setDialog('task');
+    location.hash = '#discussions';
   }
 
   const heading = {
+    discussions: '對話與計畫',
     overview: '總覽',
     tasks: '任務工作台',
     projects: '專案',
@@ -184,6 +203,7 @@ function Workbench() {
         <div className="workspace-label">本地開發空間</div>
         <nav aria-label="主要導覽">
           {[
+            ['discussions', '✦', '對話與計畫'],
             ['overview', '◈', '總覽'],
             ['tasks', '▤', '任務工作台'],
             ['rules', '≡', '規則庫'],
@@ -236,13 +256,14 @@ function Workbench() {
             </span>
             <WorkerConnection/>
             <button className="primary" disabled={!data.projects.length} onClick={newTask}>
-              ＋ 新增任務
+              ＋ 新對話
             </button>
           </div>
         </header>
 
         <main>
           <PendingPermissions/>
+          {view==='discussions'&&base.data&&<Discussions data={data} projectId={project} discussionId={discussionId} onTaskCreated={task=>{base.refresh();location.hash='#task/'+task.id;}}/>}
           {base.error && (
             <div className="offline">
               <strong>{base.error}</strong>
@@ -395,7 +416,7 @@ function Workbench() {
                 eyebrow="TASK WORKSPACE"
                 title="任務工作台"
                 description="從需求到成果，每個階段都可追溯。"
-              />
+              ><details><summary>進階建立方式</summary><button className="secondary" disabled={!data.projects.length} onClick={()=>setDialog('task')}>使用完整任務設定</button></details></Heading>
               <div className="filter-bar">
                 <div className="tabs">
                   {[

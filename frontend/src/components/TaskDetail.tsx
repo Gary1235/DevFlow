@@ -854,6 +854,9 @@ function ExecutionPanel({ data }: { data: DetailData }) {
     PhaseStarted: '階段開始',
     PhaseVerified: '階段驗證完成',
     PlannerGuided: '規劃 AI 規則內自動指導',
+    SupervisorReviewing: '主管 AI 判斷問題',
+    ValidationRepairStarted: '實作 AI 修正驗證問題',
+    UnvalidatedCheckpoint: '保存待修正成果',
     WorkflowPaused: '超出規則／階段確認點暫停',
     WorkflowContinued: '人工確認後繼續執行',
     TaskReviewed: '成果審核',
@@ -1458,6 +1461,7 @@ export function TaskDetail({
             </p>
           </div>
           <div className="button-row">
+            <button className="primary" disabled={action.busy} onClick={()=>void action.run(async()=>{const conversation=await api<{id:string}>('/api/tasks/'+currentTask.id+'/conversation','POST',{});location.hash='#discussion/'+conversation.id;})}>與主 AI 討論</button>
             {currentTask.plan && (
               <button
                 className="secondary"
@@ -1552,11 +1556,11 @@ export function TaskDetail({
           </div>
         </div>
         <div className="meta-strip">
-          <Meta label="規劃 AI" value={selectionText(currentTask.ai?.planning)} />
+          <Meta label={currentTask.workflow?.simpleMode?'主管 AI':'規劃 AI'} value={selectionText(currentTask.ai?.planning)} />
           <Meta
             label="實作 AI"
             value={
-              currentTask.workflow?.steps
+              currentTask.workflow?.steps && !currentTask.workflow.simpleMode
                 ? '依流程步驟設定'
                 : selectionText(currentTask.ai?.implementation)
             }
@@ -1595,7 +1599,11 @@ export function TaskDetail({
       {isRetryOpen &&
         ['Failed', 'Rejected'].includes(currentTask.status) &&
         currentTask.plan && <><RetryPanel task={currentTask} onChanged={handleChanged} />{currentTask.status==='Failed'&&<WorkspaceRecovery task={currentTask} onChanged={handleChanged}/>}</>}
-      <TaskContext task={currentTask} onChanged={handleChanged} />
+      {currentTask.workflow?.simpleMode?<>
+        {currentTask.sourceDiscussionId&&<a className="text-link" href={'#discussion/'+currentTask.sourceDiscussionId}>← 回到需求與計畫對話</a>}
+        <p className="info-banner">{currentTask.status==='AwaitingReview'?'自動建置與驗證已通過，請開啟預覽進行人工測試，再審核成果。建置通過不代表功能已驗收。':'主管協調實作與專案驗證，計畫內問題自動處理；通過後交由你測試。'}</p>
+        <details><summary>進階執行詳情與流程設定</summary><TaskContext task={currentTask} onChanged={handleChanged}/></details>
+      </>:<TaskContext task={currentTask} onChanged={handleChanged} />}
       {isModelOpen && (
         <TaskModelSettings
           task={currentTask}

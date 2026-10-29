@@ -17,7 +17,7 @@ export function Heading({eyebrow,title,description,children}:{eyebrow:string;tit
 export function Modal({title,eyebrow,onClose,children,wide=false}:{title:string;eyebrow?:string;onClose:()=>void;children:ReactNode;wide?:boolean}){
   const ref=useRef<HTMLDialogElement>(null),id=useId();
   useEffect(()=>{const dialog=ref.current!;dialog.showModal();return()=>{if(dialog.open)dialog.close();};},[]);
-  return <dialog ref={ref} className={wide?'wide-dialog':''} aria-labelledby={id} onCancel={e=>{e.preventDefault();onClose();}}><div className="dialog-heading"><div><p className="eyebrow">{eyebrow}</p><h2 id={id}>{title}</h2></div><button className="icon-button" aria-label="關閉視窗" onClick={onClose}>✕</button></div>{children}</dialog>;
+  return <dialog ref={ref} className={wide?'wide-dialog':''} aria-labelledby={id} onCancel={e=>{e.preventDefault();onClose();}}><div className="dialog-heading"><div><p className="eyebrow">{eyebrow}</p><h2 id={id}>{title}</h2></div><button type="button" className="icon-button" aria-label="關閉視窗" onClick={onClose}>✕</button></div>{children}</dialog>;
 }
 export function AiChoice({providers,value,onChange,inherit=false,label}:{providers:Provider[];value:Selection|null;onChange:(s:Selection|null)=>void;inherit?:boolean;label:string}){
   const selectedProvider=providers.find(p=>p.id===value?.provider);

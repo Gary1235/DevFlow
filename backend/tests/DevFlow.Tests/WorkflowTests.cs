@@ -19,6 +19,150 @@ public sealed class WorkflowTests : IAsyncLifetime
     public Task DisposeAsync() { Directory.Delete(root, true); return Task.CompletedTask; }
     private static WorkflowStep Step(string name, string kind = "Implementation", string provider = "codex", bool pause = false) =>
         new(Guid.NewGuid(), name, kind, new(provider, name + "-model"), "Only " + name, WaitForApproval: pause);
+
+    [Theory][InlineData(false)][InlineData(true)]
+    public async Task Simple_workflow_uses_the_supervisor_for_build_repairs_and_pauses_only_when_needed(bool needsUser)
+    {
+        var task=WorkTask.Create(project.Id,"Simple task","Implement","Build passes").SetPlan("Fix source and build").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),new("antigravity","implementer")),
+            Workflow=WorkflowDefinition.Normalize(new(Steps:[Step("Implementation",provider:"antigravity")],SimpleMode:true))};
+        await store.AddTaskAsync(task);
+        var supervisor=new QueuedReviewerFixture(new Queue<string>(needsUser?
+            ["{\"verdict\":\"NeedsUserConfirmation\",\"summary\":\"需求未定義，需要你選擇。\"}"]:
+            ["{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"修正編譯錯誤，保留需求與測試。\"}","{\"verdict\":\"Pass\",\"summary\":\"符合計畫。\"}"]));
+        var validator=new SimpleValidationFixture();
+        var coordinator=new ExecutionCoordinator(store,agent,workspace,validator,supervisor,new DiffFixture());
+        await coordinator.ExecuteNextAsync();
+        var updated=(await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(needsUser?Status.AwaitingStepApproval:Status.AwaitingReview,updated.Status);
+        Assert.Equal(needsUser?1:2,agent.Calls.Count);
+        if(!needsUser)Assert.Contains("主管",agent.Calls.Last().Task.TaskRules);
+        else Assert.True(updated.StepResults!.Last().RequiresRework);
+    }
+
+    [Fact] public async Task All_saved_project_profiles_are_validated_without_task_level_configuration()
+    {
+        var validation=new ProfileValidationFixture();
+        var profiles=new[]{new ValidationProfile("front","Frontend","frontend","npm",["run","build"]),new("back","Backend","backend","dotnet",["build"])};
+        var result=await new AllProjectValidationRunner(validation).ValidateAsync(project with{ValidationProfiles=profiles},new("worktree","base"),Guid.NewGuid(),TddPhase.Implementation,default);
+        Assert.Equal(new[]{"front","back"},validation.Calls);Assert.Equal(1,result.ExitCode);Assert.Contains("Backend",result.Error);
+    }
+
+    private sealed class ProfileValidationFixture:IValidationRunner {
+        public List<string?> Calls=[];
+        public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p,Workspace w,Guid run,TddPhase phase,CancellationToken ct){
+            Calls.Add(p.DefaultValidationProfileId);return Task.FromResult(new ValidationEvidence(p.DefaultValidationProfileId=="back"?1:0,0,0,[],[],"Command","compiler error","CommandFailed"));
+        }
+    }
+    [Fact] public async Task Nested_supervision_retries_keep_distinct_validation_artifacts()
+    {
+        var inner=new AttemptTrackingValidation();var runner=new AllProjectValidationRunner(inner);
+        var workspace=new Workspace("worktree","base");var run=Guid.NewGuid();
+        await runner.ValidateAsync(project,workspace,run,TddPhase.Implementation,default);
+        var guided=Assert.IsType<AllProjectValidationRunner>(runner.ForAttempt(10));
+        await guided.ValidateAsync(project,workspace,run,TddPhase.Implementation,default);
+        await guided.ForAttempt(1).ValidateAsync(project,workspace,run,TddPhase.Implementation,default);
+        Assert.Equal(new[]{1,2,3},inner.Attempts);
+    }
+    private sealed class AttemptTrackingValidation:IValidationRunner,IValidationAttemptRunner {
+        public List<int> Attempts=[];
+        public IValidationRunner ForAttempt(int value){Attempts.Add(value);return this;}
+        public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p,Workspace w,Guid run,TddPhase phase,CancellationToken ct)=>Task.FromResult(new ValidationEvidence(0,0,0,[],[],"Command"));
+    }
+    [Fact] public async Task Simple_workflow_stops_repeated_identical_validation_errors_and_preserves_a_resumable_checkpoint()
+    {
+        var task=WorkTask.Create(project.Id,"Simple task","Implement","Build passes").SetPlan("Fix source and build").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),new("antigravity","implementer")),
+            Workflow=WorkflowDefinition.Normalize(new(Steps:[Step("Implementation",provider:"antigravity")],SimpleMode:true))};
+        await store.AddTaskAsync(task);
+        var answers=new Queue<string>(Enumerable.Repeat("{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"修正編譯錯誤\"}",2));
+        await new ExecutionCoordinator(store,agent,workspace,new SimpleValidationFixture(true),new QueuedReviewerFixture(answers),new DiffFixture()).ExecuteNextAsync();
+        var paused=(await store.GetTaskAsync(task.Id))!;
+        Assert.Equal(Status.AwaitingStepApproval,paused.Status);Assert.Equal(3,agent.Calls.Count);
+        var checkpoint=Assert.Single(paused.StepResults!);Assert.True(checkpoint.RequiresRework);Assert.Contains("連續三次",checkpoint.Summary);
+        var continued=await store.ContinueWorkflowAsync(task.Id,paused.Version,instructions:"重新檢查編譯錯誤來源");
+        Assert.Equal(Status.Queued,continued.Status);Assert.Empty(continued.StepResults!);Assert.Equal(checkpoint.ResultCommit,continued.ResumeCommit);
+    }
+
+    [Fact] public async Task Simple_optional_review_routes_changes_through_the_supervisor_then_revalidates_and_reviews_again()
+    {
+        var task=WorkTask.Create(project.Id,"Simple task","Implement","Build passes").SetPlan("Fix source and build").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),new("antigravity","implementer")),
+            Workflow=WorkflowDefinition.Normalize(new(Steps:[Step("Implementation",provider:"antigravity"),Step("Review","Review","claude")],SimpleMode:true))};
+        await store.AddTaskAsync(task);
+        var answers=new Queue<string>(["{\"verdict\":\"Pass\",\"summary\":\"主管確認初版\"}","{\"verdict\":\"NeedsChanges\",\"summary\":\"補齊空狀態\"}",
+            "{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"依原計畫補齊空狀態\"}","{\"verdict\":\"Pass\",\"summary\":\"驗收通過\"}"]);
+        await Coordinator(new QueuedReviewerFixture(answers)).ExecuteNextAsync();
+        Assert.Equal(Status.AwaitingReview,(await store.GetTaskAsync(task.Id))!.Status);Assert.Equal(2,agent.Calls.Count);
+        Assert.Equal("manager",agent.Calls.Last().Task.Ai!.Planning!.Model);Assert.Contains("主管指示",agent.Calls.Last().Task.TaskRules);
+        Assert.Equal(2,Assert.Single(await store.ListRunsAsync(task.Id)).AiReviews!.Length);Assert.Empty(answers);
+    }
+
+    private sealed class SimpleValidationFixture(bool alwaysFail=false):IValidationRunner {
+        private int calls;
+        public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p,Workspace w,Guid run,TddPhase phase,CancellationToken ct){
+            calls++;var fail=calls==2||alwaysFail&&calls>1;return Task.FromResult(new ValidationEvidence(fail?1:0,0,0,[],[],"Command",fail?"compiler error":null,fail?"CommandFailed":null));
+        }
+    }
+    [Fact] public async Task Delegated_review_corrections_upgrade_the_implementation_model_and_preserve_the_reviewer()
+    {
+        var implementation=Step("Implementation",provider:"antigravity");var review=Step("Review","Review","claude");
+        var task=WorkTask.Create(project.Id,"Review repair","Implement","Build passes").SetPlan("Implement and independently review").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),implementation.Selection),
+            Workflow=WorkflowDefinition.Normalize(new(Steps:[implementation,review],SimpleMode:true)),
+            Delegation=new([new(implementation.Selection!),new(review.Selection!),new(new("codex","strong"))],
+                [new("Implementation","Implement",implementation.Selection!,"Implement"),new("Review","Review",review.Selection!,"Review",Kind:"Review")])};
+        await store.AddTaskAsync(task);
+        var answers=new Queue<string>(["{\"verdict\":\"Pass\",\"summary\":\"主管確認\"}","{\"verdict\":\"NeedsChanges\",\"summary\":\"需要修正\"}",
+            "{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"升級實作模型修正\",\"implementation\":{\"provider\":\"codex\",\"model\":\"strong\"}}","{\"verdict\":\"Pass\",\"summary\":\"驗收通過\"}"]);
+        await Coordinator(new QueuedReviewerFixture(answers)).ExecuteNextAsync();
+        var result=(await store.GetTaskAsync(task.Id))!;Assert.Equal(Status.AwaitingReview,result.Status);
+        Assert.Equal("strong",agent.Calls.Last().Task.Ai!.Implementation!.Model);Assert.Equal("claude",result.Workflow!.Steps![1].Selection!.Provider);Assert.Equal("strong",result.Workflow.Steps[0].Selection!.Model);
+    }
+    [Fact] public async Task Worker_images_reach_both_implementation_and_independent_review_without_persisting_binary_data()
+    {
+        var task=await Add(Step("Implementation"),Step("Review","Review","claude"));
+        var loader=new ImageLoaderFixture();var reviewer=new ImageReviewerFixture();
+        await new ExecutionCoordinator(store,agent,workspace,new ValidatorFixture(),reviewer,new DiffFixture(),images:loader).ExecuteNextAsync();
+        Assert.Equal(loader.Image,Assert.Single(Assert.Single(agent.Calls).Task.InputImages!));
+        Assert.Equal(loader.Image,Assert.Single(reviewer.Task!.InputImages!));Assert.Null((await store.GetTaskAsync(task.Id))!.InputImages);
+    }
+    private sealed class ImageLoaderFixture:ITaskImageLoader{
+        public PromptImage Image=new("reference.png","image/png","test-image-payload");
+        public Task<WorkTask> LoadAsync(WorkTask task,CancellationToken ct)=>Task.FromResult(task with{InputImages=[Image]});
+    }
+    private sealed class ImageReviewerFixture:IPlanningRunner{
+        public WorkTask? Task;
+        public Task<string> PlanAsync(WorkTask task,Workspace workspace,Guid runId,CancellationToken ct){Task=task;return System.Threading.Tasks.Task.FromResult("{\"verdict\":\"Pass\",\"summary\":\"符合圖片需求\"}");}
+    }
+    [Theory][InlineData(false)][InlineData(true)]
+    public async Task Integration_review_failure_is_never_reported_as_passed_and_simple_flow_repairs_it(bool repair)
+    {
+        var target=new string('d',40);
+        var task=WorkTask.Create(project.Id,"Integration","Preserve both sides","Build passes").SetPlan("Integrate and review").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),new("codex","implementer")),Workflow=new(false,SimpleMode:repair),
+            Plan=new("Integrate and review",1,target),Integration=new(Guid.NewGuid(),Guid.NewGuid(),new string('c',40),target,["legacy-dotnet-test"],[new("claude","reviewer")])};
+        await store.AddTaskAsync(task);
+        var answers=new Queue<string>(repair?["{\"verdict\":\"NeedsChanges\",\"summary\":\"補齊整合處理\"}","{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"依原需求修正整合\"}","{\"verdict\":\"Pass\",\"summary\":\"完整通過\"}"]:["{\"verdict\":\"NeedsChanges\",\"summary\":\"補齊整合處理\"}"]);
+        await Coordinator(new QueuedReviewerFixture(answers)).ExecuteNextAsync();
+        var updated=(await store.GetTaskAsync(task.Id))!;Assert.Equal(repair?Status.AwaitingReview:Status.Failed,updated.Status);Assert.Equal(repair?2:1,agent.Calls.Count);
+        Assert.Equal(repair?"Pass":"NeedsChanges",(await store.ListRunsAsync(task.Id)).Single().AiReviews!.Last().Verdict);Assert.Empty(answers);
+    }
+    [Theory][InlineData(false)][InlineData(true)]
+    public async Task Main_ai_can_upgrade_automatic_work_but_cannot_override_an_explicit_provider(bool pinned)
+    {
+        var assignment=new AgentAssignment("Implementation","修正畫面",new("antigravity","fast"),"依能力分配",pinned);
+        var task=WorkTask.Create(project.Id,"Auto task","Implement","Build passes").SetPlan("Fix source and build").ApprovePlan() with{
+            Policy=new(false,[]),Ai=new(new("codex","manager"),assignment.Selection),
+            Workflow=WorkflowDefinition.Normalize(new(Steps:[new(Guid.NewGuid(),"Implementation",Selection:assignment.Selection)],SimpleMode:true)),
+            Delegation=new([new(new("antigravity","fast")),new(new("codex","strong"))],[assignment])};
+        await store.AddTaskAsync(task);
+        var responses=new Queue<string>(["{\"verdict\":\"ResolvedWithinRules\",\"summary\":\"需要較強模型處理這個錯誤\",\"implementation\":{\"provider\":\"codex\",\"model\":\"strong\"}}","{\"verdict\":\"Pass\",\"summary\":\"完成\"}"]);
+        await Coordinator(new QueuedReviewerFixture(responses),new SimpleValidationFixture()).ExecuteNextAsync();
+        var result=(await store.GetTaskAsync(task.Id))!;Assert.Equal(pinned?Status.AwaitingStepApproval:Status.AwaitingReview,result.Status);
+        Assert.Equal(pinned?1:2,agent.Calls.Count);
+        if(!pinned){Assert.Equal("strong",agent.Calls.Last().Task.Ai!.Implementation!.Model);Assert.Equal("manager",result.Ai!.Planning!.Model);}
+    }
     private async Task<WorkTask> Add(params WorkflowStep[] steps)
     {
         var task = WorkTask.Create(project.Id, "Feature", "Build", "Pass tests").SetPlan("Plan").ApprovePlan() with
@@ -332,13 +476,14 @@ public sealed class WorkflowTests : IAsyncLifetime
         public async Task ExecuteAsync(WorkTask task, Workspace w, Guid run, TddPhase phase, CancellationToken ct)
         { Calls.Add((task, w)); if (OnExecute != null) await OnExecute(); if (FailName != null && task.Title.EndsWith(FailName)) throw new InvalidOperationException("fixture failed"); }
     }
-    private sealed class WorkspaceFixture : IWorkspaceManager
+    private sealed class WorkspaceFixture : IWorkspaceManager,IIntegrationWorkspaceManager
     {
         public List<string> Sources = []; private int snapshots;
         public Task<Workspace> CreateAsync(ProjectDefinition p, Guid run, CancellationToken ct)
         { Sources.Add(p.BaseBranch); return Task.FromResult(new Workspace("worktree", p.BaseBranch == "main" ? "base" : p.BaseBranch)); }
         public Task<string> SnapshotAsync(Workspace w, CancellationToken ct) => Task.FromResult("commit" + ++snapshots);
         public Task AssertUnchangedAsync(Workspace w, CancellationToken ct) => Task.CompletedTask;
+        public Task<string[]> IntegrateAsync(Workspace w,string sourceCommit,CancellationToken ct)=>Task.FromResult(Array.Empty<string>());
     }
     private sealed class ValidatorFixture : IValidationRunner
     { public Task<ValidationEvidence> ValidateAsync(ProjectDefinition p, Workspace w, Guid run, TddPhase phase, CancellationToken ct) => Task.FromResult(new ValidationEvidence(0, 1, 0, ["test"], [])); }

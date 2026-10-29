@@ -38,7 +38,7 @@ public interface IProcessRunner
         string? standardInput, CancellationToken ct);
 }
 public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner agent, IWorkspaceManager workspaces, IValidationRunner validation,
-    IPlanningRunner? reviewer = null, IResultDiffReader? diffs = null, IExecutionPolicyGuard? guard = null)
+    IPlanningRunner? reviewer = null, IResultDiffReader? diffs = null, IExecutionPolicyGuard? guard = null,ITaskImageLoader? images = null)
 {
     public async Task<bool> ExecuteNextAsync(CancellationToken ct = default)
     {
@@ -55,6 +55,7 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
             await using var activity = new TaskActivityReporter(store, claim.Run.Id);
             await activity.StageAsync("準備實作工作目錄", ct);
             var project = await store.GetProjectAsync(claim.Task.ProjectId, ct) ?? throw new MissingEntityException("Project not found.");
+            if(images is not null)claim=claim with{Task=await images.LoadAsync(claim.Task,ct)};
             var baseCommit = claim.Task.ResumeCommit ?? claim.Task.StepResults?.LastOrDefault()?.ResultCommit ?? claim.Task.RevisionCommit ?? claim.Task.Plan?.BaseCommit;
             var source = baseCommit is { } revision ? project with { BaseBranch = revision } : project;
             workspace = await workspaces.CreateAsync(source, claim.Run.Id, ct);
@@ -163,7 +164,7 @@ public sealed partial class ExecutionCoordinator(ITaskStore store, IAgentRunner 
         }
         return true;
     }
-    private sealed record AcceptanceResult(string Verdict, string Summary);
+    private sealed record AcceptanceResult(string Verdict, string Summary,AiSelection? Implementation=null);
     private async Task MonitorCancellationAsync(Guid taskId, CancellationTokenSource execution)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));

@@ -22,6 +22,10 @@ public sealed record WorkTask(Guid Id, Guid ProjectId, string Title, string Desc
     [System.Text.Json.Serialization.JsonIgnore]
     public string? ReadOnlyInstruction { get; init; }
     [System.Text.Json.Serialization.JsonIgnore]
+    public PromptImage[]? InputImages { get; init; }
+    public AgentDelegation? Delegation { get; init; }
+    public TaskImageReference[]? ImageReferences { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
     public string ArtifactStage { get; init; } = "Planning";
     public static WorkTask Create(Guid projectId, string title, string description, string criteria)
     {

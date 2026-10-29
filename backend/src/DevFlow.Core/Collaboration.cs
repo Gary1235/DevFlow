@@ -29,7 +29,7 @@ public sealed record WorkflowStepResult(Guid StepId, string Name, string Kind, s
     string? ResultCommit, string? Summary, AiSelection? Selection, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt = null,
     bool? RequiresRework = null);
 public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection[]? Reviewers = null, int MaxReviewRetries = 0,
-    WorkflowStep[]? Steps = null)
+    WorkflowStep[]? Steps = null, bool SimpleMode = false)
 {
     public static WorkflowDefinition Normalize(WorkflowDefinition? flow)
     {
@@ -41,7 +41,7 @@ public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection
                 throw new ArgumentException("流程需有 1 至 20 個步驟，並至少包含一個實作步驟。");
             if (steps.Any(s => s is null || s.Id == Guid.Empty) || steps.Select(s => s.Id).Distinct().Count() != steps.Length)
                 throw new ArgumentException("流程步驟 ID 必須唯一且非空。");
-            if (flow.MaxReviewRetries != 0) throw new ArgumentException("自訂流程失敗後請手動檢查並重試，不支援自動修正輪次。");
+            if (flow.MaxReviewRetries != 0 && !flow.SimpleMode) throw new ArgumentException("自訂流程失敗後請手動檢查並重試，不支援自動修正輪次。");
             steps = steps.Select(s =>
             {
                 if (s.Kind is not ("Implementation" or "Review" or "Validation" or "Approval"))
@@ -61,13 +61,18 @@ public sealed record WorkflowDefinition(bool PlanningEnabled = true, AiSelection
 public sealed record AiAcceptanceReport(Guid Id, int Attempt, int Stage, AiSelection Selection, string ResultCommit, string Verdict, string Summary, DateTimeOffset CreatedAt);
 public sealed record PlanDiscussionContext(int TaskVersion, int Revision, string Text, string? BaseCommit,
     string Requirements, string AcceptanceCriteria, string? TaskRules = null);
+public sealed record DiscussionExecutionPlan(string Title, string Description, string AcceptanceCriteria, string[] OpenQuestions);
+public sealed record DiscussionImage(Guid Id, string Name, string MimeType, int Bytes);
+public sealed record ImageUpload(string Name, string MimeType, string Data);
+public sealed record PromptImage(string Name, string MimeType, string Data);
 public sealed record DiscussionMessage(Guid Id, string Role, string Content, DateTimeOffset CreatedAt, AiSelection? Selection = null, string? BaseCommit = null, Guid? OperationId = null,
-    PlanDiscussionContext? PlanContext = null, string? ProposedPlan = null);
+    PlanDiscussionContext? PlanContext = null, string? ProposedPlan = null, DiscussionExecutionPlan? ExecutionPlan = null, Guid? CreatedTaskId = null, DiscussionImage[]? Images = null, AgentDecision? AgentProposal = null, TaskFeedbackContext? FeedbackContext = null);
 public sealed record DiscussionDraft(Guid Id, string Title, string Description, string AcceptanceCriteria, string? TaskRules = null,
     string[]? AllowedPaths = null, Guid[]? RuleIds = null, string[]? OpenQuestions = null, Guid? CreatedTaskId = null, int SourceVersion = 0);
 public sealed record Discussion(Guid Id, Guid ProjectId, string Title, AiSelection Selection, RuleSnapshot[] Rules,
     DiscussionMessage[] Messages, DiscussionDraft[] Drafts, int Version, DateTimeOffset UpdatedAt,
-    Guid? ActiveOperation = null, string? Error = null, bool AutoTitle = false, Guid? LastOperationId = null, Guid? PlanTaskId = null);
+    Guid? ActiveOperation = null, string? Error = null, bool AutoTitle = false, Guid? LastOperationId = null, Guid? PlanTaskId = null,
+    bool AgentMode=false,Guid? ActiveTaskId=null,TaskFeedbackContext? FeedbackContext=null);
 
 public static class TaskInstructions
 {

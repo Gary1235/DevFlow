@@ -230,7 +230,7 @@ dotnet run --project src/DevFlow.Worker
 
 API 也使用相同的 DevFlow__DatabasePath 與 DevFlow__ArtifactsRoot。WorktreeRoot 必須在被調度的 Repository 外。
 Worker 自動尋找或使用設定的 CLI；所有供應商都不可用時明確停止啟動。
-Codex 正式權限路徑每個階段使用獨立 app-server thread，傳入需求與核准計畫；規劃使用 read-only sandbox，實作使用 workspace-write sandbox。預設註冊實驗性 dynamic tools，提供主程序的結構化檔案操作與已儲存驗證設定；舊 CLI 可用 `DevFlow__StructuredToolsEnabled=false` 關閉此擴充。其他供應商仍沿用各自原生權限協定。
+Codex 正式權限路徑每個階段使用獨立 app-server thread，傳入需求與核准計畫；規劃使用 read-only sandbox，實作使用 workspace-write sandbox。預設註冊實驗性 dynamic tools，提供主程序的結構化檔案操作與已儲存驗證設定。Antigravity、Claude、Gemini 透過本次執行的 stdio MCP 連到相同執行器；原生權限協定仍負責其他操作。可用 `DevFlow__StructuredToolsEnabled=false` 關閉所有 CLI 的結構化擴充。參見[接入、生命週期及驗證限制](../docs/structured-tools-all-cli.md)。
 依據 [OpenAI Docs：非互動模式](https://learn.chatgpt.com/docs/non-interactive-mode) 建立 Adapter；
 已核對本機 CLI help。真實 CLI 驗證工具已加入，但在本次 Desktop 工具環境中，
 CLI 啟動回傳 Windows 存取拒絕；尚未完成真實模型的規劃／實作驗證。

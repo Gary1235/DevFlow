@@ -5,7 +5,7 @@ using Status = DevFlow.Core.TaskStatus;
 namespace DevFlow.Infrastructure;
 
 // Mutations and events commit together; BEGIN IMMEDIATE serializes queue claims.
-public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, ITaskToolApprovalStore
+public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, ITaskToolApprovalStore,IAutoDelegationStore
 {
     private readonly string path = Path.GetFullPath(databasePath);
     public string DatabasePath => path;
@@ -63,6 +63,7 @@ public sealed partial class SqliteTaskStore(string databasePath) : ITaskStore, I
             CREATE TABLE IF NOT EXISTS ToolPermissionRules(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS PermissionPolicies(Id TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS CliVerifications(Provider TEXT PRIMARY KEY, Payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS AgentQuotas(Provider TEXT PRIMARY KEY, Payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS ValidationProbes(Id TEXT PRIMARY KEY, ProjectId TEXT NOT NULL REFERENCES Projects(Id),
                 State TEXT NOT NULL, CreatedAt TEXT NOT NULL, Payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS IX_ValidationProbes_Project ON ValidationProbes(ProjectId,CreatedAt);

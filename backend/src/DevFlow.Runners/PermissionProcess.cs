@@ -7,7 +7,7 @@ namespace DevFlow.Runners;
 
 // Translate each CLI's native approval protocol. Decisions are always one-use;
 // DevFlow owns task/project rules rather than mutating the CLI's global settings.
-internal sealed class PermissionProcess(IProcessRunner inner, string provider, IToolApprovalOperation operation, IStructuredTools? structuredTools = null) : IProcessRunner
+internal sealed class PermissionProcess(IProcessRunner inner, string provider, IToolApprovalOperation operation, IStructuredTools? structuredTools = null, StructuredMcpBridge? mcp = null, PromptImage[]? images = null) : IProcessRunner
 {
     private static string? Option(IReadOnlyList<string> args, string key)
     { for (var i = 0; i + 1 < args.Count; i++) if (args[i] == key) return args[i + 1]; return null; }
@@ -80,7 +80,9 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
             if (structuredTools is not null) prompt += "\nPrefer devflow_read_file, devflow_list_files and devflow_search for literal worktree operations. " +
                 "Use devflow_write_file for scoped file updates and devflow_run_validation with a saved profileId when available. " +
                 "These host tools avoid shell parsing; do not wrap them in shell commands. A tool error does not authorize bypassing its restrictions.";
-            await Send(s, 3, "turn/start", new { threadId = thread, input = new[] { new { type = "text", text = prompt } }, outputSchema = schema }, token);
+            var input=new List<object>{new{type="text",text=prompt}};
+            foreach(var image in images??[])input.Add(new{type="image",url=$"data:{image.MimeType};base64,{image.Data}"});
+            await Send(s, 3, "turn/start", new { threadId = thread, input, outputSchema = schema }, token);
             string? turn = null; var deltas = new StringBuilder(); var items = new Dictionary<string, JsonElement>();
             var toolCalls = new HashSet<string>();
             while (true)
@@ -165,6 +167,14 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
         var tools = command.IndexOf("--tools"); command[tools + 1] = operation.ReadOnly ? "Read,Glob,Grep,Bash" : "Read,Glob,Grep,Bash,Edit,Write";
         command[command.IndexOf("--permission-mode") + 1] = operation.ReadOnly ? "plan" : "default";
         command.AddRange(["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--verbose"]);
+        if (mcp is not null) {
+            command[command.IndexOf("--mcp-config")+1] = JsonSerializer.Serialize(new { mcpServers = new Dictionary<string, object> { [mcp.Name] = mcp.StdioConfig } });
+            // Strict MCP config exposes only our operation-local server, whose
+            // executor owns the actual per-call policy check.
+            var denied = command.IndexOf("--disallowedTools");
+            if (denied >= 0) command.RemoveRange(denied, 2);
+            prompt += "\n" + StructuredMcpBridge.Instructions;
+        }
         string? final = null;
         var result = await process.RunInteractiveAsync(executable, command, cwd, async (s, token) =>
         {
@@ -178,7 +188,12 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                     var response = Object(frame, "response");
                     if (Text(response, "request_id") != "devflow-initialize") throw new InvalidOperationException("Claude initialization mismatch.");
                     if (Text(response, "subtype") != "success") throw new InvalidOperationException("Claude 權限對話初始化失敗。");
-                    await s.SendAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null }, token); started = true;
+                    object content=prompt;
+                    if(images is {Length:>0}){
+                        var imageBlocks=new List<object>{new{type="text",text=prompt}};
+                        imageBlocks.AddRange(images.Select(image=>(object)new{type="image",source=new{type="base64",media_type=image.MimeType,data=image.Data}}));content=imageBlocks;
+                    }
+                    await s.SendAsync(new { type = "user", session_id = "", message = new { role = "user", content }, parent_tool_use_id = (string?)null }, token); started = true;
                 }
                 if (type == "control_request")
                 {
@@ -186,7 +201,7 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                     if (Text(request, "subtype") == "can_use_tool" && Text(request, "tool_name") is { } tool)
                     {
                         var input = PermissionTools.BindWorkspace(provider, tool, Object(request, "input"), cwd);
-                        var allowed = await Ask(tool, input, cwd, token, s);
+                        var allowed = mcp?.OwnsTool(tool) == true || await Ask(tool, input, cwd, token, s);
                         response = allowed ? new { behavior = "allow", updatedInput = (object)input } : (object)new { behavior = "deny", message = "DevFlow 未核准本次操作。", interrupt = false };
                     }
                     else response = new { behavior = "deny", message = "Unsupported permission request" };
@@ -210,9 +225,14 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
             await Send(s, 1, "initialize", new { protocolVersion = 1, clientCapabilities = new { fs = new { readTextFile = false, writeTextFile = false }, terminal = false }, clientInfo = new { name = "DevFlow", version = "0.7.0" } }, token);
             var init = await Response(s, 1, token);
             if (init.GetProperty("protocolVersion").GetInt32() != 1) throw new InvalidOperationException("Gemini ACP version mismatch.");
-            await Send(s, 2, "session/new", new { cwd, mcpServers = Array.Empty<object>() }, token);
+            if(images is {Length:>0}&&(!Object(Object(init,"agentCapabilities"),"promptCapabilities").TryGetProperty("image",out var imageCapability)||imageCapability.ValueKind!=JsonValueKind.True))
+                throw new InvalidOperationException("目前 Gemini CLI 未宣告支援圖片輸入，圖片已保存，請切換模型工具後重試。");
+            await Send(s, 2, "session/new", new { cwd, mcpServers = mcp is null ? Array.Empty<object>() : new[] { mcp.AcpConfig } }, token);
             var session = Text(await Response(s, 2, token), "sessionId") ?? throw new InvalidOperationException("Gemini 未建立對話。");
-            await Send(s, 3, "session/prompt", new { sessionId = session, prompt = new[] { new { type = "text", text = prompt } } }, token);
+            if (mcp is not null) prompt += "\n" + StructuredMcpBridge.Instructions;
+            var blocks=new List<object>{new{type="text",text=prompt}};
+            blocks.AddRange((images??[]).Select(image=>(object)new{type="image",data=image.Data,mimeType=image.MimeType}));
+            await Send(s, 3, "session/prompt", new { sessionId = session, prompt = blocks }, token);
             var tools = new Dictionary<string, JsonObject>();
             while (true)
             {
@@ -239,7 +259,7 @@ internal sealed class PermissionProcess(IProcessRunner inner, string provider, I
                     var input = merged["rawInput"] is JsonObject raw ? JsonSerializer.SerializeToElement(raw) : JsonSerializer.SerializeToElement(new { Request = merged });
                     var options = p.GetProperty("options").EnumerateArray().ToArray();
                     var canAllow = options.Any(o => Text(o, "kind") == "allow_once");
-                    var allowed = canAllow && await Ask(toolName, input, cwd, token, s);
+                    var allowed = canAllow && (mcp?.OwnsTool(toolName) == true || await Ask(toolName, input, cwd, token, s));
                     var option = options.FirstOrDefault(o => Text(o, "kind") == (allowed ? "allow_once" : "reject_once"));
                     object outcome = option.ValueKind == JsonValueKind.Undefined ? new { outcome = "cancelled" } : (object)new { outcome = "selected", optionId = option.GetProperty("optionId").GetString() };
                     await s.SendAsync(new { jsonrpc = "2.0", id = requestId.Clone(), result = new { outcome } }, token);

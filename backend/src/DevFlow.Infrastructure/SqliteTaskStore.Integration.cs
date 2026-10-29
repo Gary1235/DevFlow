@@ -4,7 +4,7 @@ using Status = DevFlow.Core.TaskStatus;
 namespace DevFlow.Infrastructure;
 public sealed partial class SqliteTaskStore
 {
-    public Task<WorkTask> CreateIntegrationTaskAsync(Guid taskId, int expectedVersion, Guid runId, string sourceCommit, string targetCommit, CancellationToken ct)
+    public Task<WorkTask> CreateIntegrationTaskAsync(Guid taskId, int expectedVersion, Guid runId, string sourceCommit, string targetCommit, CancellationToken ct,bool continueCurrent=false)
     {
         sourceCommit = GitCommit.Require(sourceCommit); targetCommit = GitCommit.Require(targetCommit);
         using var c = Open(ct); using var tx = c.BeginTransaction();
@@ -22,9 +22,16 @@ public sealed partial class SqliteTaskStore
         var task = WorkTask.Create(source.ProjectId, title, source.Description, source.AcceptanceCriteria) with {
             Status = Status.Queued, Plan = new(source.Plan!.Text, 1, targetCommit), Ai = source.Ai, Rules = source.Rules,
             TaskRules = source.TaskRules + "\nIntegration task: preserve the latest target and original validated result; resolve integration issues only. Original task: " + source.Id,
-            Policy = source.Policy, Workflow = new(false, Reviewers: reviewers.Take(2).ToArray()),
+            Policy = source.Policy, ImageReferences=source.ImageReferences, Workflow = new(false, Reviewers: reviewers.Take(2).ToArray()),
             Integration = new(source.Id, run.Id, sourceCommit, targetCommit, validationIds, reviewers)
         };
+        if(continueCurrent){
+            task=source with{Status=Status.Queued,Version=source.Version+1,Plan=new(source.Plan.Text,source.Plan.Revision+1,targetCommit),
+                TaskRules=task.TaskRules,Workflow=task.Workflow! with{SimpleMode=true},Integration=task.Integration,Delegation=null,
+                ExecutionBaseCommit=targetCommit,RevisionCommit=targetCommit,RevisionInstructions="整合最新本地基底並重新驗證。",ResumeCommit=null,Recovery=null,StepResults=[],ActiveStepId=null,AutoReviewAttempt=0};
+            UpdateTask(c,tx,task,source.Version);RecordPlan(c,tx,task,null,"IntegrationContinuation");Event(c,tx,task.Id,"IntegrationQueued",$"接續目前任務整合成果 {sourceCommit} 與最新基底 {targetCommit}，需重新驗證及人工驗收。");
+            tx.Commit();return Task.FromResult(task);
+        }
         Execute(c, tx, "INSERT INTO Tasks VALUES($id,$project,$status,$version,$created,$payload)", ("$id", task.Id.ToString()), ("$project", task.ProjectId.ToString()),
             ("$status", (int)task.Status), ("$version", task.Version), ("$created", task.CreatedAt.ToString("O")), ("$payload", JsonSerializer.Serialize(task)));
         Event(c, tx, task.Id, "IntegrationQueued", $"來源 {source.Id}／{sourceCommit}；新基底 {targetCommit}。整合完成後需重新審核。");

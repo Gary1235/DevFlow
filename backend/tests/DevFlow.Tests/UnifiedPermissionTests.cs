@@ -18,12 +18,13 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
         project = new(Guid.NewGuid(), "Test", root, "main", ["test"]); await store.AddProjectAsync(project);
     }
     public Task DisposeAsync() { Directory.Delete(root, true); return Task.CompletedTask; }
-    private sealed class NativeFixture(string provider, bool turnGrant = false, string commandText = "git diff --stat", string? toolName = null, object? toolInput = null) : IProcessRunner, IInteractiveProcessRunner
+    private sealed class NativeFixture(string provider, bool turnGrant = false, string commandText = "git diff --stat", string? toolName = null, object? toolInput = null, bool imageSupport=true) : IProcessRunner, IInteractiveProcessRunner
     {
         public string? ToolName { get; } = toolName;
         public object? ToolInput { get; } = toolInput;
         public string CommandText {get;}=commandText;
         public bool TurnGrant { get; } = turnGrant;
+        public bool ImageSupport {get;}=imageSupport;
         public CancellationTokenSource Exited { get; } = new();
         public List<JsonElement> Sent { get; } = [];
         public List<string[]> Arguments { get; } = [];
@@ -69,7 +70,7 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
                 }
                 if (provider == "gemini")
                 {
-                    if (method == "initialize") Frame(new { jsonrpc = "2.0", id = 1, result = new { protocolVersion = 1 } });
+                    if (method == "initialize") Frame(new { jsonrpc = "2.0", id = 1, result = new { protocolVersion = 1,agentCapabilities=new{promptCapabilities=new{image=owner.ImageSupport}} } });
                     if (method == "session/new") Frame(new { jsonrpc = "2.0", id = 2, result = new { sessionId = "session" } });
                     if (method == "session/prompt")
                     {
@@ -133,6 +134,28 @@ public sealed class UnifiedPermissionTests : IAsyncLifetime
         // The fixture is the transport; only the registry's existence validation uses this executable.
         var executable = Environment.ProcessPath!;
         return new(process, new CliRegistry(codex: executable, claude: executable, gemini: executable), root, store);
+    }
+    [Theory][InlineData("codex")][InlineData("claude")][InlineData("gemini")]
+    public async Task Images_are_sent_as_native_multimodal_content_not_as_plain_text_paths(string provider)
+    {
+        await store.SavePermissionPolicyAsync(new(AutomationEnabled:true),0);
+        var task=WorkTask.Create(project.Id,"Image","Inspect","Describe") with{Ai=new(new(provider)),InputImages=[new("image.png","image/png","aGVsbG8=")]};
+        await store.AddTaskAsync(task);await store.QueuePlanningAsync(task.Id,task.Version);var claim=(await store.ClaimPlanningAsync())!;
+        var process=new NativeFixture(provider,commandText:"git status --short");
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await Runner(provider,process).PlanAsync(claim.Task with{InputImages=task.InputImages},new(root,"base"),claim.Run.Id,timeout.Token);
+        var message=provider=="claude"?process.Sent.Single(s=>s.TryGetProperty("type",out var t)&&t.GetString()=="user"):
+            process.Sent.Single(s=>s.TryGetProperty("method",out var m)&&m.GetString()==(provider=="codex"?"turn/start":"session/prompt"));
+        var content=provider=="claude"?message.GetProperty("message").GetProperty("content"):message.GetProperty("params").GetProperty(provider=="codex"?"input":"prompt");
+        var image=content.EnumerateArray().Single(i=>i.GetProperty("type").GetString()=="image");
+        Assert.Equal(provider=="codex"?"data:image/png;base64,aGVsbG8=":"aGVsbG8=",provider=="codex"?image.GetProperty("url").GetString():provider=="claude"?image.GetProperty("source").GetProperty("data").GetString():image.GetProperty("data").GetString());
+    }
+    [Fact] public async Task Gemini_without_image_capability_fails_before_sending_the_prompt()
+    {
+        var task=WorkTask.Create(project.Id,"Image","Inspect","Describe") with{Ai=new(new("gemini")),InputImages=[new("image.png","image/png","aGVsbG8=")]};
+        await store.AddTaskAsync(task);var process=new NativeFixture("gemini",imageSupport:false);
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>Runner("gemini",process).PlanAsync(task,new(root,"base"),Guid.NewGuid(),default));
+        Assert.DoesNotContain(process.Sent,s=>s.TryGetProperty("method",out var m)&&m.GetString()=="session/prompt");
     }
     [Theory]
     [InlineData("codex", true)] [InlineData("claude", true)] [InlineData("gemini", true)]

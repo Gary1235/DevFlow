@@ -23,7 +23,7 @@ public sealed class DiscussionApiTests : IAsyncLifetime
         Directory.CreateDirectory(directory);
         factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b => b
             .ConfigureAppConfiguration((_, c) => c.AddInMemoryCollection(new Dictionary<string, string?> { ["DevFlow:DatabasePath"] = Path.Combine(directory, "api.db"), ["DevFlow:ArtifactsRoot"] = Path.Combine(directory, "artifacts") }))
-            .ConfigureTestServices(s => { s.AddSingleton<IPlanningRunner>(runner); s.AddSingleton<IWorkspaceManager, ReadOnlyWorkspace>(); }));
+            .ConfigureTestServices(s => { s.AddSingleton<IPlanningRunner>(runner); s.AddSingleton<IWorkspaceManager, ReadOnlyWorkspace>();s.AddSingleton<DevFlow.Api.IAgentCatalog,AgentCatalogFixture>(); }));
         client = factory.CreateClient(); client.DefaultRequestHeaders.Add("X-DevFlow-Action", "1");
         project = new(Guid.NewGuid(), "Demo", directory, "main", ["test"]);
         await factory.Services.GetRequiredService<ITaskStore>().AddProjectAsync(project);
@@ -37,6 +37,39 @@ public sealed class DiscussionApiTests : IAsyncLifetime
         return await response.Content.ReadFromJsonAsync<JsonElement>();
     }
 
+    [Fact] public async Task Discussion_plan_is_reviewed_then_atomically_started_with_selected_models_without_replanning()
+    {
+        var d=await CreateDiscussion();var id=d.GetProperty("id").GetGuid();
+        (await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,message="改善列表，先討論"})).EnsureSuccessStatusCode();
+        runner.Response="{\"title\":\"改善列表\",\"description\":\"調整版面\",\"acceptanceCriteria\":\"前後端建置通過並人工測試\",\"plan\":\"1. 修改列表樣式。\\n2. 執行專案前後端建置。\",\"openQuestions\":[]}";
+        var response=await client.PostAsJsonAsync($"/api/discussions/{id}/execution-plan",new{expectedVersion=2});response.EnsureSuccessStatusCode();
+        var plan=(await response.Content.ReadFromJsonAsync<Discussion>())!;
+        var message=plan.Messages.Last();Assert.NotNull(message.ExecutionPlan);Assert.NotNull(message.ProposedPlan);
+        var store=factory.Services.GetRequiredService<SqliteTaskStore>();Assert.Empty(await store.ListTasksAsync());Assert.Null(await store.ClaimNextAsync());
+        var input=new{expectedVersion=plan.Version,planMessageId=message.Id,supervisor=new{provider="codex",model="supervisor",reasoningEffort="high"},implementation=new{provider="antigravity",model="implementer"},reviewer=new{provider="claude",model="opus"}};
+        var started=await client.PostAsJsonAsync($"/api/discussions/{id}/start",input);started.EnsureSuccessStatusCode();
+        var task=(await store.ListTasksAsync()).Single();
+        Assert.Equal(DevFlow.Core.TaskStatus.Queued,task.Status);Assert.True(task.Workflow!.SimpleMode);Assert.False(task.Policy!.Tdd);
+        Assert.Equal(message.ProposedPlan,task.Plan!.Text);Assert.Equal("supervisor",task.Ai!.Planning!.Model);Assert.Equal("implementer",task.Ai.Implementation!.Model);
+        Assert.Equal("opus",task.Workflow.Steps!.Last().Selection!.Model);Assert.Equal(id,task.SourceDiscussionId);Assert.Equal(2,runner.Calls);
+        var duplicate=await client.PostAsJsonAsync($"/api/discussions/{id}/start",input);duplicate.EnsureSuccessStatusCode();
+        Assert.Equal(task.Id,(await duplicate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid());Assert.Single(await store.ListTasksAsync());
+    }
+
+    [Theory][InlineData(false)][InlineData(true)]
+    public async Task Discussion_start_rejects_unresolved_questions_and_changed_conversation(bool changed)
+    {
+        var d=await CreateDiscussion();var id=d.GetProperty("id").GetGuid();
+        (await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,message="討論列表"})).EnsureSuccessStatusCode();
+        runner.Response="{\"title\":\"列表\",\"description\":\"調整版面\",\"acceptanceCriteria\":\"建置通過\",\"plan\":\"修改列表並建置。\",\"openQuestions\":"+(changed?"[]":"[\"哪些頁面？\"]")+"}";
+        var reply=await client.PostAsJsonAsync($"/api/discussions/{id}/execution-plan",new{expectedVersion=2});reply.EnsureSuccessStatusCode();
+        var plan=(await reply.Content.ReadFromJsonAsync<Discussion>())!;
+        if(changed)(await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=plan.Version,message="再改需求"})).EnsureSuccessStatusCode();
+        var started=await client.PostAsJsonAsync($"/api/discussions/{id}/start",new{expectedVersion=plan.Version,planMessageId=plan.Messages.Last().Id,supervisor=new{provider="codex"},implementation=new{provider="codex"}});
+        Assert.Equal(changed?HttpStatusCode.Conflict:HttpStatusCode.BadRequest,started.StatusCode);
+        Assert.Empty(await factory.Services.GetRequiredService<ITaskStore>().ListTasksAsync());
+    }
+
     private async Task<(WorkTask Task, Discussion Discussion)> CreatePlanDiscussion()
     {
         var task = WorkTask.Create(project.Id, "訂單頁面", "改善列表排版", "建置成功")
@@ -46,6 +79,100 @@ public sealed class DiscussionApiTests : IAsyncLifetime
         var response = await client.PostAsJsonAsync($"/api/tasks/{task.Id}/plan-discussion", new { });
         response.EnsureSuccessStatusCode();
         return (task, (await response.Content.ReadFromJsonAsync<Discussion>())!);
+    }
+    private sealed class AgentCatalogFixture:DevFlow.Api.IAgentCatalog{
+        public Task<AgentCandidate[]> ReadAsync(AiSelection primary,CancellationToken ct)=>Task.FromResult(new[]{new AgentCandidate(primary),new(new("codex","manager")),new(new("antigravity","fast")),new(new("claude","strong"))});
+    }
+    private async Task<Discussion> CreateAgent(){var response=await client.PostAsJsonAsync("/api/discussions",new{projectId=project.Id,agentMode=true,selection=new{provider="codex",model="manager"}});response.EnsureSuccessStatusCode();return(await response.Content.ReadFromJsonAsync<Discussion>())!;}
+    private static string StartDecision()=>JsonSerializer.Serialize(new AgentDecision("我會把畫面交給 agy，完成後建置檢查。","Start","改善畫面","修改畫面","建置通過並人工測試","修改樣式，執行建置並驗證。",[new("畫面","改善樣式",new("antigravity","fast"),"使用者指定畫面交給 agy",true)]));
+    [Fact] public async Task Agent_proactively_proposes_without_start_and_followup_invalidates_old_approval()
+    {
+        var d=await CreateAgent();runner.Response=StartDecision().Replace("\"Start\"","\"Propose\"");
+        var response=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="幫我改善畫面，交給 agy"});response.EnsureSuccessStatusCode();
+        d=(await response.Content.ReadFromJsonAsync<Discussion>())!;Assert.NotNull(d.Messages.Last().AgentProposal);Assert.Empty(await store().ListTasksAsync());
+        runner.Response=JsonSerializer.Serialize(new AgentDecision("這份計畫會保留原本資料欄位。"));
+        response=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="好，但先解釋會影響哪裡？"});response.EnsureSuccessStatusCode();d=(await response.Content.ReadFromJsonAsync<Discussion>())!;
+        Assert.Empty(await store().ListTasksAsync());Assert.Null(d.Messages.Last().AgentProposal);
+        // A short acknowledgement after a normal answer is not approval of an older plan.
+        runner.Response=StartDecision();response=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="好"});Assert.Equal(HttpStatusCode.BadRequest,response.StatusCode);Assert.Empty(await store().ListTasksAsync());
+    }
+    [Fact] public async Task Agent_uses_current_primary_and_starts_without_model_forms_only_after_explicit_intent()
+    {
+        var d=await CreateAgent();runner.Response=StartDecision();
+        var refused=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="請先解釋方案"});Assert.Equal(HttpStatusCode.BadRequest,refused.StatusCode);Assert.Empty(await store().ListTasksAsync());
+        d=(await store().GetDiscussionAsync(d.Id,default))!;
+        var started=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="開始做"});started.EnsureSuccessStatusCode();
+        d=(await started.Content.ReadFromJsonAsync<Discussion>())!;Assert.Empty(await store().ListTasksAsync());Assert.NotNull(d.Messages.Last().AgentProposal);
+        // Confirmation must execute the displayed plan without asking AI to silently rewrite it.
+        runner.Response="unexpected model call";
+        started=await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="好，照這份計畫做"});started.EnsureSuccessStatusCode();
+        d=(await started.Content.ReadFromJsonAsync<Discussion>())!;var task=Assert.Single(await store().ListTasksAsync());Assert.Equal("修改樣式，執行建置並驗證。",task.Plan!.Text);
+        Assert.Equal(d.ActiveTaskId,task.Id);Assert.Equal("manager",task.Ai!.Planning!.Model);Assert.Equal("antigravity",task.Workflow!.Steps![0].Selection!.Provider);Assert.True(task.Delegation!.Assignments[0].Pinned);
+        var changed=await client.PutAsJsonAsync($"/api/discussions/{d.Id}/agent",new{expectedVersion=d.Version,selection=new{provider="claude",model="strong"}});changed.EnsureSuccessStatusCode();
+        var latest=(await store().GetTaskAsync(task.Id))!;Assert.Equal("strong",latest.Ai!.Planning!.Model);Assert.Equal(JsonSerializer.Serialize(task.Workflow),JsonSerializer.Serialize(latest.Workflow));
+    }
+    [Fact] public async Task Paused_agent_answers_followup_without_resuming_then_explicitly_continues_the_checkpoint()
+    {
+        var d=await CreateAgent();runner.Response=StartDecision();(await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="開始做"})).EnsureSuccessStatusCode();
+        d=(await store().GetDiscussionAsync(d.Id,default))!;(await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="Proceed",intent="Start"})).EnsureSuccessStatusCode();
+        var task=Assert.Single(await store().ListTasksAsync());
+        await store().SaveTaskAsync(task with{Status=DevFlow.Core.TaskStatus.AwaitingStepApproval,StepResults=[new(task.Workflow!.Steps![0].Id,"畫面","Implementation","Completed",Guid.NewGuid(),"checkpoint","是否保留舊 API？",new("antigravity","fast"),DateTimeOffset.UtcNow,RequiresRework:true)],Version=task.Version+1},task.Version);
+        d=(await store().GetDiscussionAsync(d.Id,default))!;runner.Response=JsonSerializer.Serialize(new AgentDecision("保留舊 API 可避免其他頁面失效。你可以繼續詢問影響。"));
+        (await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="什麼意思？會影響哪裡？"})).EnsureSuccessStatusCode();
+        Assert.Equal(DevFlow.Core.TaskStatus.AwaitingStepApproval,(await store().GetTaskAsync(task.Id))!.Status);Assert.Contains(JsonSerializer.Serialize("是否保留舊 API？"),runner.Instruction);Assert.Equal("checkpoint",runner.WorkspaceBase);
+        d=(await store().GetDiscussionAsync(d.Id,default))!;runner.Response=JsonSerializer.Serialize(new AgentDecision("依討論保留舊介面並繼續。","Resume",ResumeInstructions:"保留舊 API，僅調整畫面。"));
+        (await client.PostAsJsonAsync($"/api/discussions/{d.Id}/messages",new{expectedVersion=d.Version,message="繼續",intent="Resume"})).EnsureSuccessStatusCode();
+        var resumed=(await store().GetTaskAsync(task.Id))!;Assert.Equal(DevFlow.Core.TaskStatus.Queued,resumed.Status);Assert.Equal("checkpoint",resumed.ResumeCommit);Assert.Empty(resumed.StepResults!);
+    }
+
+    private const string Png="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=";
+    [Fact] public async Task Images_are_persisted_served_only_under_their_discussion_and_reused_when_switching_models()
+    {
+        var created=await CreateDiscussion();var id=created.GetProperty("id").GetGuid();
+        var response=await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,images=new[]{new{name="截圖.png",mimeType="image/png",data=Png}},selection=new{provider="codex"}});
+        response.EnsureSuccessStatusCode();var discussion=(await response.Content.ReadFromJsonAsync<Discussion>())!;
+        var image=Assert.Single(discussion.Messages[0].Images!);Assert.Equal("請查看附圖。",discussion.Messages[0].Content);
+        Assert.DoesNotContain(Png,JsonSerializer.Serialize(discussion));
+        Assert.Equal(Png,Assert.Single(runner.Images!).Data);
+        Assert.Contains(discussion.Messages[0].Id.ToString(),runner.Transcript);
+        var file=await client.GetAsync($"/api/discussions/{id}/images/{image.Id}");file.EnsureSuccessStatusCode();
+        Assert.Equal("image/png",file.Content.Headers.ContentType!.MediaType);Assert.Equal(Convert.FromBase64String(Png),await file.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.NotFound,(await client.GetAsync($"/api/discussions/{Guid.NewGuid()}/images/{image.Id}")).StatusCode);
+        (await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=discussion.Version,message="再看這張圖",selection=new{provider="claude"}})).EnsureSuccessStatusCode();
+        Assert.Equal(Png,Assert.Single(runner.Images!).Data);
+        var saved=(await store().GetDiscussionAsync(id,default))!;
+        var denied=await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=saved.Version,message="看看",selection=new{provider="antigravity"}});
+        Assert.Equal(HttpStatusCode.BadRequest,denied.StatusCode);Assert.Equal(saved.Version,(await store().GetDiscussionAsync(id,default))!.Version);
+    }
+
+    [Theory][InlineData("image/svg+xml","PHN2Zz48L3N2Zz4=")][InlineData("image/png","not-base64")][InlineData("image/png","aGVsbG8=")]
+    public async Task Invalid_image_upload_does_not_start_a_cli_turn_or_save_a_message(string mime,string data)
+    {
+        var created=await CreateDiscussion();var id=created.GetProperty("id").GetGuid();
+        var reply=await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,images=new[]{new{name="invalid.png",mimeType=mime,data}}});
+        Assert.Equal(HttpStatusCode.BadRequest,reply.StatusCode);Assert.Equal(0,runner.Calls);
+        Assert.Empty((await store().GetDiscussionAsync(id,default))!.Messages);
+    }
+    [Fact] public async Task Image_count_size_and_stale_version_fail_before_running_the_cli()
+    {
+        var created=await CreateDiscussion();var id=created.GetProperty("id").GetGuid();
+        var tooMany=Enumerable.Repeat(new{name="shot.png",mimeType="image/png",data=Png},5).ToArray();
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,images=tooMany})).StatusCode);
+        var oversized=new string('A',4*((DiscussionImageStore.MaxBytes+2)/3)+4);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,images=new[]{new{name="shot.png",mimeType="image/png",data=oversized}}})).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=99,images=new[]{new{name="shot.png",mimeType="image/png",data=Png}}})).StatusCode);
+        Assert.Equal(0,runner.Calls);Assert.Empty((await store().GetDiscussionAsync(id,default))!.Messages);
+        var imageStore=factory.Services.GetRequiredService<DiscussionImageStore>();
+        await Assert.ThrowsAsync<ArgumentException>(()=>imageStore.SaveAsync(id,[new("shot.png","image/png",Png)],default,DiscussionImageStore.MaxDiscussionBytes));
+    }
+    [Fact] public async Task Failed_cli_reply_keeps_images_available_for_explicit_retry()
+    {
+        var created=await CreateDiscussion();var id=created.GetProperty("id").GetGuid();runner.Fail=true;
+        Assert.Equal(HttpStatusCode.BadGateway,(await client.PostAsJsonAsync($"/api/discussions/{id}/messages",new{expectedVersion=0,images=new[]{new{name="shot.png",mimeType="image/png",data=Png}}})).StatusCode);
+        var failed=(await store().GetDiscussionAsync(id,default))!;Assert.Single(failed.Messages[0].Images!);
+        runner.Fail=false;
+        (await client.PostAsJsonAsync($"/api/discussions/{id}/reply",new{expectedVersion=failed.Version,selection=new{provider="claude"}})).EnsureSuccessStatusCode();
+        Assert.Equal(Png,Assert.Single(runner.Images!).Data);Assert.Equal(2,(await store().GetDiscussionAsync(id,default))!.Messages.Length);
     }
 
     [Fact] public async Task Plan_discussion_is_task_local_persistent_and_does_not_run_until_a_message_is_sent()
@@ -296,19 +423,23 @@ public sealed class DiscussionApiTests : IAsyncLifetime
     private SqliteTaskStore store() => factory.Services.GetRequiredService<SqliteTaskStore>();
     private sealed class ReadOnlyWorkspace : IWorkspaceManager
     {
-        public Task<Workspace> CreateAsync(ProjectDefinition p, Guid id, CancellationToken ct) => Task.FromResult(new Workspace(p.RepositoryPath, "base-commit"));
+        public Task<Workspace> CreateAsync(ProjectDefinition p, Guid id, CancellationToken ct) => Task.FromResult(new Workspace(p.RepositoryPath, p.BaseBranch=="main"?"base-commit":p.BaseBranch));
         public Task AssertUnchangedAsync(Workspace w, CancellationToken ct) => Task.CompletedTask;
         public Task<string> SnapshotAsync(Workspace w, CancellationToken ct) => throw new InvalidOperationException("Discussion must never commit.");
     }
     private sealed class ReadOnlyRunner : IPlanningRunner
     {
         public int Calls; public bool Fail, Block, UseHook; public string? Transcript, Instruction, Response;
+        public PromptImage[]? Images;
+        public string? WorkspaceBase;
         public TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<string> PlanAsync(WorkTask task, Workspace w, Guid id, CancellationToken ct)
         {
             Calls++; if (Fail) throw new InvalidOperationException("Provider unavailable");
             Transcript = task.Description;
             Instruction = task.ReadOnlyInstruction;
+            Images=task.InputImages;
+            WorkspaceBase=w.BaseCommit;
             if (UseHook)
             {
                 // Hook installation now belongs to RoutedCliRunner. This fake runner exercises

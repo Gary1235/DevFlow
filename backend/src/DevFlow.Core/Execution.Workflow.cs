@@ -9,6 +9,7 @@ public sealed partial class ExecutionCoordinator
         {
             ct.ThrowIfCancellationRequested();
             var task = await store.BeginWorkflowStepAsync(claim.Run.Id, ct);
+            task=task with{InputImages=claim.Task.InputImages};
             if (task.Status == TaskStatus.Cancelled) throw new OperationCanceledException("Task cancelled.");
             var index = task.StepResults?.Length ?? 0;
             var step = task.Workflow!.Steps!.ElementAtOrDefault(index);
@@ -31,12 +32,16 @@ public sealed partial class ExecutionCoordinator
                     Policy = step.AllowedPaths is { Length: > 0 } ? stepPolicy : policy,
                     Ai = new(step.Selection, step.Selection), ArtifactStage = "Step-" + step.Id.ToString("N") };
                 scopedTask = TaskInstructions.WithValidationCommands(scopedTask, StepProject(project, step));
-                var validator = validation is IStepValidationRunner scoped ? scoped.ForStep(step.Id) : validation;
+                if(task.Workflow.SimpleMode&&step.Kind=="Implementation")scopedTask=scopedTask with{Ai=new(task.Ai?.Planning,step.Selection)};
+                IValidationRunner validator = validation is IStepValidationRunner scoped ? scoped.ForStep(step.Id) : validation;
+                if(task.Workflow.SimpleMode)validator=new AllProjectValidationRunner(validator);
                 string? summary = null;
                 if (step.Kind == "Implementation")
                 {
                     await activity.StageAsync(step.Name + " · 基準測試", ct);
-                    var baseline = await ValidateStepAsync(validator, project, stepBase, claim, step, TddPhase.Baseline, ct);
+                    var baseline = task.Workflow.SimpleMode
+                        ? await ValidateWithRepairsAsync(scopedTask,StepProject(project,step),stepBase,claim.Run.Id,TddPhase.Baseline,validator,[],async token=>{if(guard is not null)await guard.CheckAsync(stepBase,policy,token);},ct)
+                        : await ValidateStepAsync(validator, project, stepBase, claim, step, TddPhase.Baseline, ct);
                     if (baseline.ExitCode != 0 || baseline.Failed != 0) throw new InvalidOperationException("基準驗證未通過：" + (baseline.Error ?? "請查看驗證日誌。"));
                     var recovering = task.Recovery is { Applied: false } && task.Recovery.StepId == step.Id;
                     if (policy.Tdd && !recovering && baseline.Kind != "DotnetTest") throw new InvalidOperationException("TDD 需要可收集逐項結果的 DotnetTest 驗證；一般建置指令請改用標準實作模式。");
@@ -51,7 +56,7 @@ public sealed partial class ExecutionCoordinator
                     {
                         await store.AppendEventAsync(task.Id, "PhaseStarted", step.Name + " · " + phase, ct);
                         await activity.StageAsync(step.Name + " · AI 實作 · " + phase, ct);
-                        await agent.ExecuteAsync(scopedTask, stepBase, claim.Run.Id, phase, ct);
+                        await ExecuteManagedAsync(scopedTask, stepBase, claim.Run.Id, phase, ct);
                         await activity.StageAsync(step.Name + " · 檢查變更與測試 · " + phase, ct);
                         if (guard is not null)
                         {
@@ -82,10 +87,12 @@ public sealed partial class ExecutionCoordinator
                     summary = "實作與驗證完成；成果 " + head + "\n" + string.Join("\n", validationEvidence);
                     if (reviewer is not null && diffs is not null && task.Ai?.Planning is { } plannerSelection)
                     {
+                        string? previousSupervision=null;var repeatedSupervision=0;
                         for (var guidanceRound = 0; ; guidanceRound++)
                         {
                             await activity.StageAsync(step.Name + " · 規劃 AI 檢查與問題分流", ct);
                             var stepDiff = await diffs.ReadAsync(project, claim.Run with { BaseCommit = stepBase.BaseCommit, ResultCommit = head, FinishedAt = DateTimeOffset.UtcNow }, ct);
+                            if(task.Workflow.SimpleMode)plannerSelection=(await store.GetTaskAsync(task.Id,ct))?.Ai?.Planning??plannerSelection;
                             var supervisionTask = scopedTask with
                             {
                                 Ai = new(plannerSelection, scopedTask.Ai?.Implementation),
@@ -108,8 +115,10 @@ public sealed partial class ExecutionCoordinator
                             WorkTask.Required(supervisionVerdict.Summary, 20000);
                             await workspaces.AssertUnchangedAsync(workspace with { BaseCommit = head }, ct);
                             if (supervisionVerdict.Verdict == "Pass") break;
-                            if (supervisionVerdict.Verdict == "ResolvedWithinRules" && guidanceRound >= 2)
-                                supervisionVerdict = supervisionVerdict with { Verdict = "NeedsUserConfirmation", Summary = "已達規劃 AI 自動修正上限。" + supervisionVerdict.Summary };
+                            var signature=supervisionVerdict.Summary+stepDiff.Patch;
+                            repeatedSupervision=signature==previousSupervision?repeatedSupervision+1:1;previousSupervision=signature;
+                            if (supervisionVerdict.Verdict == "ResolvedWithinRules" && (task.Workflow.SimpleMode?repeatedSupervision>=3:guidanceRound>=2))
+                                supervisionVerdict = supervisionVerdict with { Verdict = "NeedsUserConfirmation", Summary = (task.Workflow.SimpleMode?"連續三次未有進展，已暫停。":"已達規劃 AI 自動修正上限。") + supervisionVerdict.Summary };
                             if (supervisionVerdict.Verdict == "ResolvedWithinRules")
                             {
                                 var guidanceText = WorkTask.Required(supervisionVerdict.Summary, 12000);
@@ -117,14 +126,16 @@ public sealed partial class ExecutionCoordinator
                                 await activity.StageAsync(step.Name + " · 依規劃 AI 指導自動修正", ct);
                                 var guidedTask = scopedTask with { ArtifactStage = scopedTask.ArtifactStage + "-Guidance-" + guidanceRound, TaskRules = scopedTask.TaskRules + "\n【規劃 AI 規則內直接指導】：" + guidanceText };
                                 var guidedBase = workspace with { BaseCommit = head };
-                                await agent.ExecuteAsync(guidedTask, guidedBase, claim.Run.Id, TddPhase.Implementation, ct);
+                                await ExecuteManagedAsync(guidedTask, guidedBase, claim.Run.Id, TddPhase.Implementation, ct);
                                 if (guard is not null)
                                 {
                                     await guard.CheckAsync(guidedBase, policy, ct);
                                     await guard.CheckAsync(guidedBase, stepPolicy, ct);
                                 }
                                 var guidedValidator = validator is IValidationAttemptRunner guidedAttempts ? guidedAttempts.ForAttempt(10 + guidanceRound) : validator;
-                                var guidedEvidence = await ValidateStepAsync(guidedValidator, project, guidedBase, claim, step, TddPhase.Implementation, ct);
+                                var guidedEvidence = task.Workflow.SimpleMode
+                                    ? await ValidateWithRepairsAsync(guidedTask,StepProject(project,step),guidedBase,claim.Run.Id,TddPhase.Implementation,guidedValidator,baseline.PassedTests.Concat(red),async token=>{if(guard is not null)await guard.CheckAsync(guidedBase,policy,token);},ct)
+                                    : await ValidateStepAsync(guidedValidator, project, guidedBase, claim, step, TddPhase.Implementation, ct);
                                 if (!ValidationPassed(guidedEvidence, baseline.PassedTests.Concat(red)))
                                     throw new InvalidOperationException("規劃 AI 指揮修正後測試未通過。");
                                 validationEvidence.Add($"Guided correction {guidanceRound + 1}: exit {guidedEvidence.ExitCode}, total {guidedEvidence.Total}, failed {guidedEvidence.Failed}");
@@ -160,13 +171,14 @@ public sealed partial class ExecutionCoordinator
                 }
                 else if (step.Kind == "Review")
                 {
+                    string? previousReview=null;var repeatedReview=0;
                     for (var reviewAttempt = 0; ; reviewAttempt++)
                     {
                         await activity.StageAsync(step.Name + " · AI 審查", ct);
                         if (reviewer is null || diffs is null) throw new InvalidOperationException("AI acceptance services are not configured.");
                         var diff = await diffs.ReadAsync(project, claim.Run with { BaseCommit = executionBase, ResultCommit = head,
                             FinishedAt = DateTimeOffset.UtcNow }, ct);
-                        var reviewTask = scopedTask with { Rules = [], ArtifactStage = scopedTask.ArtifactStage + "-Review-" + reviewAttempt, ReadOnlyInstruction =
+                        var reviewTask = scopedTask with { Ai=new(step.Selection), Rules = [], ArtifactStage = scopedTask.ArtifactStage + "-Review-" + reviewAttempt, ReadOnlyInstruction =
                             "Review the exact current implementation. Do not edit, implement, commit or change files. Return ONLY JSON with verdict (Pass, NeedsChanges, Uncertain) and summary. Check the requirements, approved plan, applicable rules and current step instructions.\n" +
                             TaskInstructions.For(scopedTask, "Acceptance") + "\nApproved plan:\n" + task.Plan?.Text +
                             "\nIndependent validation evidence:\n" + string.Join("\n", (task.StepResults ?? []).Select(r => r.Name + ": " + r.Summary)) +
@@ -179,7 +191,10 @@ public sealed partial class ExecutionCoordinator
                         await store.RecordAiReviewAsync(claim.Run.Id, new(Guid.NewGuid(), reviewAttempt + 1, index + 1, step.Selection!, head,
                             verdict.Verdict, summary, DateTimeOffset.UtcNow), ct);
                         if (verdict.Verdict == "Pass") break;
-                        if (verdict.Verdict != "NeedsChanges" || reviewAttempt >= task.Workflow.MaxReviewRetries)
+                        var reviewSignature=verdict.Summary+diff.Patch;
+                        repeatedReview=reviewSignature==previousReview?repeatedReview+1:1;previousReview=reviewSignature;
+                        if(task.Workflow.SimpleMode&&(verdict.Verdict=="Uncertain"||repeatedReview>=3))throw new SupervisorInputRequired("AI 驗收需要人工確認："+summary);
+                        if (verdict.Verdict != "NeedsChanges" || !task.Workflow.SimpleMode&&reviewAttempt >= task.Workflow.MaxReviewRetries)
                             throw new InvalidOperationException("AI 審查未通過：" + summary);
                         var implementation = task.Workflow.Steps!.Take(index).LastOrDefault(s => s.Kind == "Implementation")
                             ?? throw new InvalidOperationException("審查前沒有可修正的實作步驟。");
@@ -187,23 +202,27 @@ public sealed partial class ExecutionCoordinator
                         if ((policy.AllowedPaths is { Length: > 0 } || correctionPolicy.AllowedPaths is { Length: > 0 }) && guard is null)
                             throw new InvalidOperationException("An edit scope guard is required.");
                         var correctionValidator = validation is IStepValidationRunner stepValidator ? stepValidator.ForStep(step.Id) : validation;
+                        if(task.Workflow.SimpleMode)correctionValidator=new AllProjectValidationRunner(correctionValidator);
                         if (correctionValidator is IValidationAttemptRunner attempts) correctionValidator = attempts.ForAttempt(reviewAttempt + 1);
                         var correctionProject = StepProject(project, implementation);
                         var correctionBase = workspace with { BaseCommit = head };
                         var before = await correctionValidator.ValidateAsync(correctionProject, correctionBase, claim.Run.Id, TddPhase.Baseline, ct);
                         if (!ValidationPassed(before, [])) throw new InvalidOperationException("AI 審查修正前的驗證未通過。");
                         var correctionTask = scopedTask with {
-                            Ai = new(step.Selection, implementation.Selection), Policy = correctionPolicy,
+                            Ai = new(task.Workflow.SimpleMode?task.Ai?.Planning:step.Selection, implementation.Selection), Policy = correctionPolicy,
                             ArtifactStage = scopedTask.ArtifactStage + "-ReviewRepair-" + (reviewAttempt + 1),
                             TaskRules = scopedTask.TaskRules + "\nCorrect the review findings within the approved implementation scope; preserve all tests.\n" + summary
                         };
+                        if(task.Workflow.SimpleMode)correctionTask=correctionTask with{TaskRules=correctionTask.TaskRules+"\n主管指示：\n"+await SupervisorCorrectionAsync(correctionTask,correctionBase,claim.Run.Id,summary,ct)};
                         await store.AppendEventAsync(task.Id, "AiCorrectionStarted", step.Name + " · " + (reviewAttempt + 1), ct);
-                        await agent.ExecuteAsync(correctionTask, correctionBase, claim.Run.Id, TddPhase.Implementation, ct);
+                        await ExecuteManagedAsync(correctionTask, correctionBase, claim.Run.Id, TddPhase.Implementation, ct);
                         if (guard is not null) {
                             await guard.CheckAsync(correctionBase, policy, ct);
                             await guard.CheckAsync(correctionBase, correctionPolicy, ct);
                         }
-                        var after = await correctionValidator.ValidateAsync(correctionProject, correctionBase, claim.Run.Id, TddPhase.Implementation, ct);
+                        var after = task.Workflow.SimpleMode
+                            ? await ValidateWithRepairsAsync(correctionTask,correctionProject,correctionBase,claim.Run.Id,TddPhase.Implementation,correctionValidator,before.PassedTests,async token=>{if(guard is not null)await guard.CheckAsync(correctionBase,policy,token);},ct)
+                            : await correctionValidator.ValidateAsync(correctionProject, correctionBase, claim.Run.Id, TddPhase.Implementation, ct);
                         if (!ValidationPassed(after, before.PassedTests)) throw new InvalidOperationException("AI 審查修正後的驗證未通過。");
                         head = await workspaces.SnapshotAsync(correctionBase, ct);
                         stepBase = workspace with { BaseCommit = head };
@@ -217,6 +236,14 @@ public sealed partial class ExecutionCoordinator
                     await store.PauseWorkflowAsync(claim.Run.Id, ct);
                     return;
                 }
+            }
+            catch (SupervisorInputRequired ex) when(task.Workflow.SimpleMode)
+            {
+                if(guard is not null)await guard.CheckAsync(workspace,task.Policy??new(false,[]),ct);
+                head=await workspaces.SnapshotAsync(workspace,ct);
+                await store.AppendEventAsync(task.Id,"UnvalidatedCheckpoint","已保存尚未通過驗證的工作，等待人工回覆。",ct);
+                await store.RecordWorkflowStepAsync(claim.Run.Id,result with{State="Completed",ResultCommit=head,Summary="⚠️ 需要你確認："+ex.Message,RequiresRework=true,FinishedAt=DateTimeOffset.UtcNow},ct);
+                await store.PauseWorkflowAsync(claim.Run.Id,ct);return;
             }
             catch (Exception ex)
             {

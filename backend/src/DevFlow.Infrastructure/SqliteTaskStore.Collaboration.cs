@@ -74,28 +74,34 @@ public sealed partial class SqliteTaskStore
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
     }
 
-    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct, AiSelection? selection = null, PlanDiscussionContext? planContext = null)
+    public Task<Discussion> BeginDiscussionAsync(Guid id, int expectedVersion, string? message, CancellationToken ct, AiSelection? selection = null, PlanDiscussionContext? planContext = null, DiscussionImage[]? images = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
         if (d.Version != expectedVersion || d.ActiveOperation is not null) throw new ConflictException("Discussion changed or an AI reply is still running. Refresh before retrying.");
         if (d.Messages.Sum(m => m.Content.Length) > 120000) throw new ArgumentException("This discussion is too long. Start a new discussion with a summary.");
-        var messages = message is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "user", WorkTask.Required(message, 20000), DateTimeOffset.UtcNow, PlanContext: planContext)];
+        var messages = message is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "user", WorkTask.Required(message, 20000), DateTimeOffset.UtcNow, PlanContext: planContext, Images: images,FeedbackContext:d.FeedbackContext)];
         var title = d.AutoTitle && d.Messages.Length == 0 && message is not null
             ? SummarizeDiscussionTitle(message)
             : d.Title;
         var operationId = Guid.NewGuid();
-        var updated = d with { Title = title, Selection = AiSelection.Normalize(selection ?? d.Selection), Messages = messages, ActiveOperation = operationId, LastOperationId = operationId, Error = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
+        if(d.AgentMode&&message is not null)foreach(var quota in ConversationAgent.ParseUserQuotas(message,DateTimeOffset.UtcNow))
+            Execute(c,tx,"INSERT INTO AgentQuotas VALUES($provider,$payload) ON CONFLICT(Provider) DO UPDATE SET Payload=excluded.Payload",("$provider",quota.Provider),("$payload",JsonSerializer.Serialize(quota)));
+        if(d.AgentMode&&d.ActiveTaskId is {} activeId&&ReadOne<WorkTask>(c,tx,"Tasks",activeId) is {} active&&active.Status is not (DevFlow.Core.TaskStatus.Merged or DevFlow.Core.TaskStatus.Cancelled)){
+            var chosen=AiSelection.Normalize(selection??d.Selection);
+            if(chosen!=active.Ai?.Planning)UpdateTask(c,tx,active with{Ai=new(chosen,active.Ai?.Implementation),Version=active.Version+1},active.Version);
+        }
+        var updated = d with { Title = title, Selection = AiSelection.Normalize(selection ?? d.Selection), Messages = messages, FeedbackContext=message is null?d.FeedbackContext:null, ActiveOperation = operationId, LastOperationId = operationId, Error = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);
     }
 
     public Task<Discussion> FinishDiscussionAsync(Guid id, Guid operation, string? reply, string? baseCommit, DiscussionDraft[]? drafts, string? error, CancellationToken ct,
-        PlanDiscussionContext? planContext = null, string? proposedPlan = null)
+        PlanDiscussionContext? planContext = null, string? proposedPlan = null, DiscussionExecutionPlan? executionPlan = null)
     {
         using var c = Open(ct); using var tx = c.BeginTransaction();
         var d = ReadOne<Discussion>(c, tx, "Discussions", id) ?? throw new MissingEntityException("Discussion not found.");
         if (d.ActiveOperation != operation) throw new ConflictException("Discussion operation is no longer active.");
-        var messages = reply is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "assistant", reply, DateTimeOffset.UtcNow, d.Selection, baseCommit, operation, planContext, proposedPlan)];
+        var messages = reply is null ? d.Messages : [..d.Messages, new DiscussionMessage(Guid.NewGuid(), "assistant", reply, DateTimeOffset.UtcNow, d.Selection, baseCommit, operation, planContext, proposedPlan, executionPlan)];
         var updated = d with { Messages = messages, Drafts = drafts is null ? d.Drafts : [..d.Drafts, ..drafts], Error = error,
             ActiveOperation = null, Version = d.Version + 1, UpdatedAt = DateTimeOffset.UtcNow };
         UpdateDiscussion(c, tx, updated); tx.Commit(); return Task.FromResult(updated);

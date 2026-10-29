@@ -36,6 +36,8 @@ public sealed partial class DiscussionOperations
         private readonly object sync = new();
         private readonly StringBuilder pending = new();
         private string content = "";
+        private readonly StringBuilder structured=new();
+        public bool StructuredReply {get;set;}
         private bool disposed;
         public Guid Id { get; }
         public AiSelection Selection { get; }
@@ -49,6 +51,24 @@ public sealed partial class DiscussionOperations
         { Id = id; Selection = selection; cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown); token = cancellation.Token; }
         public void Stop() { lock (sync) { if (disposed) throw new ConflictException("This reply has already finished."); Stopped = true; cancellation.Cancel(); } }
         public void Dispose() { lock (sync) { if (disposed) return; disposed = true; cancellation.Cancel(); cancellation.Dispose(); } }
+        private void AddAssistant(string text)
+        {
+            if(!StructuredReply){content=(content+text)[..Math.Min(40000,content.Length+text.Length)];return;}
+            if(structured.Length+text.Length>1024*1024)return;
+            structured.Append(text);var source=structured.ToString();
+            static string? Field(string source,string name){
+                var match=System.Text.RegularExpressions.Regex.Match(source,"^\\s*\\{\\s*\""+name+"\"\\s*:\\s*\"");if(!match.Success)return null;
+                var start=match.Length-1;var end=source.Length;var escaped=false;
+                for(var i=start+1;i<source.Length;i++){
+                    if(escaped){escaped=false;continue;}if(source[i]=='\\'){escaped=true;continue;}if(source[i]=='\"'){end=i+1;break;}
+                }
+                var value=source[start..end];if(end==source.Length&&(source.Length==start+1||source[^1]!='\"'||escaped))value+='\"';
+                try{return JsonSerializer.Deserialize<string>(value);}catch(JsonException){return null;}
+            }
+            // Codex's planning adapter wraps its result in a plan string.
+            source=Field(source,"plan")??source;
+            if(Field(source,"reply") is {} reply)content=reply[..Math.Min(40000,reply.Length)];
+        }
 
         // Expose only assistant text. Tool output, reasoning and stderr stay in run artifacts.
         public void Append(string chunk)
@@ -65,11 +85,11 @@ public sealed partial class DiscussionOperations
                     {
                         using var document = JsonDocument.Parse(line); var json = document.RootElement;
                         if (json.TryGetProperty("event", out var synthetic) && synthetic.GetString() == "devflow_assistant_delta" && json.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
-                            content = (content + text.GetString())[..Math.Min(40000, content.Length + (text.GetString()?.Length ?? 0))];
+                            AddAssistant(text.GetString()??"");
                         else if (Selection.Provider == "antigravity" && json.TryGetProperty("event", out var kind) && kind.GetString() == "step_update" &&
                             json.TryGetProperty("step_update", out var step) && step.TryGetProperty("step_type", out var type) && type.GetString() == "agent_response" &&
                             step.TryGetProperty("text_delta", out var delta) && delta.ValueKind == JsonValueKind.String)
-                            content = (content + delta.GetString())[..Math.Min(40000, content.Length + (delta.GetString()?.Length ?? 0))];
+                            AddAssistant(delta.GetString()??"");
                     }
                     catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException) { }
                 }

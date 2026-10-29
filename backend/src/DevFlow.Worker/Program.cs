@@ -6,6 +6,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
+if (args is ["--devflow-mcp", var mcpPipe])
+{
+    await StructuredMcpBridge.RunClientAsync(mcpPipe);
+    return;
+}
 if (args is ["--agy-permission-hook", var pipeName])
 {
     await NativePermissionHook.RunClientAsync(pipeName);
@@ -45,6 +50,8 @@ builder.Services.AddSingleton(sp => new RoutedCliRunner(sp.GetRequiredService<IP
 builder.Services.AddSingleton<IAgentRunner>(sp => sp.GetRequiredService<RoutedCliRunner>());
 builder.Services.AddSingleton<IValidationRunner>(sp => new DotnetValidationRunner(sp.GetRequiredService<IProcessRunner>(), artifacts));
 builder.Services.AddSingleton<ExecutionCoordinator>();
+builder.Services.AddSingleton(new DiscussionImageStore(artifacts));
+builder.Services.AddSingleton<ITaskImageLoader,TaskImageLoader>();
 builder.Services.AddSingleton<IPlanningRunner>(sp => sp.GetRequiredService<RoutedCliRunner>());
 builder.Services.AddSingleton<IResultDiffReader, GitResultDiffReader>();
 builder.Services.AddSingleton<IExecutionPolicyGuard, GitExecutionPolicyGuard>();

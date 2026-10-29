@@ -202,7 +202,7 @@ export function ImageUploadButton({
       <button
         type="button"
         className="chat-attach-button"
-        aria-label="選擇圖片"
+        aria-label="附加圖片"
         title="附加圖片"
         disabled={busy || draft.reading || draft.images.length >= 4}
         onClick={() => fileInputRef.current?.click()}

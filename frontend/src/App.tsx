@@ -250,19 +250,23 @@ function Workbench() {
                 </option>
               ))}
             </select>
-            <span className={'connection' + (base.error ? ' error' : '')}>
+            <div className="topbar-status-group">
+              <span className={'connection' + (base.error ? ' error' : '')}>
               <i />
               {base.error ? 'API 未連線' : base.data ? 'API 已連線' : '連線中'}
             </span>
             <WorkerConnection/>
-            <button className="primary" disabled={!data.projects.length} onClick={newTask}>
+            <PendingPermissions/>
+            </div>
+  
+            <button className="primary topbar-new-chat-btn" disabled={!data.projects.length} onClick={newTask}>
               ＋ 新對話
             </button>
           </div>
         </header>
 
         <main>
-          <PendingPermissions/>
+
           {view==='discussions'&&base.data&&<Discussions data={data} projectId={project} discussionId={discussionId} onTaskCreated={task=>{base.refresh();location.hash='#task/'+task.id;}}/>}
           {base.error && (
             <div className="offline">

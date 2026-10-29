@@ -236,49 +236,51 @@ function NewConversation({ data, projectId }: { data: BaseData; projectId: strin
 
   return (
     <section className="chat-room chat-room-new">
-      <div className="chat-welcome">
-        <div className="chat-welcome-icon">✦</div>
-        <h1>想聊聊什麼？</h1>
-        <p>選專案、選主 AI，直接說需求。討論、實作、修正都在這裡完成。</p>
-        <div className="chat-project-selector">
-          <label>
-            專案
-            <select
-              value={project}
-              disabled={action.busy}
-              onChange={e => {
-                createdConversation.current = null;
-                setProject(e.target.value);
-                setSelection(
-                  remembered(
-                    'project.' + e.target.value,
-                    data.projects.find(p => p.id === e.target.value)?.aiDefaults?.planning
-                  )
-                );
-              }}
-            >
-              {data.projects.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
+      <div className="chat-room-new-container">
+        <div className="chat-welcome">
+          <div className="chat-welcome-icon">✦</div>
+          <h1>想聊聊什麼？</h1>
+          <p>選專案、選主 AI，直接說需求。討論、實作、修正都在這裡完成。</p>
+          <div className="chat-project-selector">
+            <label>
+              專案
+              <select
+                value={project}
+                disabled={action.busy}
+                onChange={event => {
+                  createdConversation.current = null;
+                  setProject(event.target.value);
+                  setSelection(
+                    remembered(
+                      'project.' + event.target.value,
+                      data.projects.find(projectItem => projectItem.id === event.target.value)?.aiDefaults?.planning
+                    )
+                  );
+                }}
+              >
+                {data.projects.map(projectItem => (
+                  <option key={projectItem.id} value={projectItem.id}>
+                    {projectItem.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
+        <Composer
+          attachments={attachments}
+          data={data}
+          selection={selection}
+          onSelection={selectedOption => {
+            setSelection(selectedOption);
+            remember('project.' + project, selectedOption);
+          }}
+          text={text}
+          onText={setText}
+          onSend={() => void send()}
+          busy={action.busy}
+        />
       </div>
-      <Composer
-        attachments={attachments}
-        data={data}
-        selection={selection}
-        onSelection={s => {
-          setSelection(s);
-          remember('project.' + project, s);
-        }}
-        text={text}
-        onText={setText}
-        onSend={() => void send()}
-        busy={action.busy}
-      />
     </section>
   );
 }
@@ -700,23 +702,26 @@ export function Discussions({
         />
         {list.error && <p className="error-banner">{list.error}</p>}
         <nav aria-label="對話列表">
-          {discussions.map(d => {
-            const project = data.projects.find(p => p.id === d.projectId);
-            const isSelected = d.id === discussionId;
+          {discussions.map(discussionItem => {
+            const matchedProject = data.projects.find(projectItem => projectItem.id === discussionItem.projectId);
+            const isSelected = discussionItem.id === discussionId;
             return (
               <a
                 className={'chat-thread' + (isSelected ? ' selected' : '')}
                 aria-current={isSelected ? 'page' : undefined}
-                key={d.id}
-                href={'#discussion/' + d.id}
+                key={discussionItem.id}
+                href={'#discussion/' + discussionItem.id}
+                title={discussionItem.title}
               >
                 <div className="chat-thread-top">
-                  <strong>{d.title}</strong>
-                  <TitleActivity state={d.activeOperation?{label:'回覆中'}:null} compact/>
+                  <strong title={discussionItem.title}>{discussionItem.title}</strong>
+                  <TitleActivity state={discussionItem.activeOperation ? { label: '回覆中' } : null} compact />
                 </div>
                 <div className="chat-thread-meta">
-                  <span className="thread-project">{project?.name || '未指定專案'}</span>
-                  {d.drafts?.length > 0 && <span className="thread-drafts">{d.drafts.length} 草稿</span>}
+                  <span className="thread-project">{matchedProject?.name || '未指定專案'}</span>
+                  {discussionItem.drafts?.length > 0 && (
+                    <span className="thread-drafts">{discussionItem.drafts.length} 草稿</span>
+                  )}
                 </div>
               </a>
             );

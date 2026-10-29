@@ -2521,3 +2521,195 @@ footer {
   resize: none;
   padding: 24px 28px;
 }
+
+
+/* Topbar Pending Permissions & Unified Notification Center */
+.pending-permissions-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.pending-permissions-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f8fafc;
+  border: 1px solid var(--line-strong);
+  color: #475569;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.pending-permissions-trigger:hover,
+.pending-permissions-trigger.active {
+  background: #f1f5f9;
+  color: #0f172a;
+  border-color: #94a3b8;
+}
+
+.pending-permissions-trigger.has-pending {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #92400e;
+}
+
+.pending-permissions-trigger.has-pending:hover {
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+
+.pending-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  display: inline-block;
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.25); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+.pending-permissions-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(420px, calc(100vw - 32px));
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
+  padding: 14px 16px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pending-permissions-popover.closed {
+  display: none;
+}
+
+.pending-popover-header .button-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pending-sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  margin: 0;
+}
+
+.pending-status-msg {
+  font-size: 12px;
+  color: #475569;
+  margin: 0;
+}
+
+
+/* Unified Topbar Status Group & Action Styling */
+.topbar-status-group {
+  display: inline-flex;
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 4px;
+  gap: 2px;
+}
+
+.topbar-status-group .connection {
+  border: none;
+  background: transparent;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.topbar-status-group .connection.error {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-radius: 999px;
+}
+
+.topbar-status-group .pending-permissions-trigger {
+  border: none;
+  background: transparent;
+  padding: 4px 10px;
+}
+
+.topbar-status-group .pending-permissions-trigger:hover,
+.topbar-status-group .pending-permissions-trigger.active {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.topbar-status-group .pending-permissions-trigger.has-pending {
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 999px;
+}
+
+.topbar-new-chat-btn {
+  font-weight: 700;
+  padding: 7px 16px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.2);
+  white-space: nowrap;
+}
+
+/* Overview Dashboard Balanced Cards & Hover */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.overview-grid .panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin-bottom: 0;
+}
+
+.metric {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.metric:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+/* Tasks Table Action Column Protection */
+.table-wrap table td:last-child {
+  white-space: nowrap;
+  width: 1%;
+}
+
+.table-wrap table td:last-child .button-row {
+  flex-wrap: nowrap;
+}
+
+/* Task Detail Header Action Row */
+.detail-heading .button-row {
+  max-width: 620px;
+  justify-content: flex-end;
+}

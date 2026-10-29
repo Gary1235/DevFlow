@@ -72,23 +72,30 @@
 .chat-sidebar nav {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
+  min-width: 0;
+  padding-right: 2px;
 }
 
 .chat-thread {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 10px 14px;
   border-radius: 10px;
   color: inherit;
   text-decoration: none;
   min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
   border: 1px solid transparent;
   background: transparent;
   transition: all 0.15s ease;
+  overflow: hidden;
+  text-align: left;
 }
 
 .chat-thread:hover {
@@ -102,25 +109,56 @@
   color: #1d4ed8;
 }
 
-.chat-thread strong {
+.chat-thread-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.chat-thread-top strong {
+  display: block;
   font-size: 13px;
   font-weight: 600;
   color: #1e293b;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
-.chat-thread.selected strong {
+.chat-thread.selected .chat-thread-top strong {
   color: #1e40af;
 }
 
-.chat-thread span {
-  font-size: 11px;
-  color: #64748b;
+.chat-thread-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.chat-thread-meta .thread-project {
+  font-size: 11px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-thread-meta .thread-drafts {
+  font-size: 11px;
+  color: #2563eb;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* 主對話視窗 */
@@ -750,13 +788,30 @@
    新對話歡迎畫面
    ========================================================================== */
 .chat-room-new {
+  display: flex;
+  flex-direction: column;
   justify-content: center;
+  align-items: center;
+  padding: 36px 24px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.chat-room-new-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 800px;
+  margin: auto;
 }
 
 .chat-welcome {
-  margin: auto auto 30px;
+  margin: 0 0 24px;
   text-align: center;
-  width: min(440px, calc(100% - 48px));
+  width: 100%;
+  max-width: 540px;
 }
 
 .chat-welcome-icon {
@@ -773,38 +828,42 @@
 }
 
 .chat-welcome p {
-  font-size: 13px;
+  font-size: 13.5px;
   color: #64748b;
   line-height: 1.6;
   margin: 0;
 }
 
 .chat-project-selector {
-  margin: 20px auto 0;
-  width: min(280px, 100%);
-  text-align: left;
+  margin: 16px auto 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .chat-project-selector label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: #475569;
 }
 
 .chat-project-selector select {
   font-size: 13px;
-  padding: 8px 12px;
+  padding: 6px 12px;
   border-radius: 8px;
   border: 1px solid #cbd5e1;
   background: #ffffff;
+  min-width: 180px;
 }
 
 .chat-room-new .chat-composer {
-  margin-top: 0;
-  margin-bottom: auto;
+  width: 100%;
+  max-width: 800px;
+  margin: 0;
 }
 
 /* 響應式佈局 */
